@@ -220,6 +220,83 @@ func TestDerivedFrom(t *testing.T) {
 	}
 }
 
+func TestDerivedFromBoundedRange(t *testing.T) {
+	s := openTestDB(t)
+	rs := s.Refs()
+
+	// Create source chain: first, second, third
+	src, err := rs.Get("source")
+	if err != nil {
+		t.Fatalf("Get source: %v", err)
+	}
+	for _, b := range []string{"first", "second", "third"} {
+		if err := src.Append(newNote(b)); err != nil {
+			t.Fatalf("Append %q: %v", b, err)
+		}
+	}
+
+	// Collect note IDs (iteration yields newest first: third, second, first)
+	var ids []NoteID
+	for n := range src.Notes().Iter() {
+		ids = append(ids, n.ID)
+	}
+
+	// Create a bounded range covering only third→second (skip first)
+	// headID is exclusive, so use ids[2] (first) as the stop point
+	bounded := &notes{s: s, tailID: ids[0], headID: ids[2]}
+
+	dst, err := rs.Get("dest")
+	if err != nil {
+		t.Fatalf("Get dest: %v", err)
+	}
+	if err := dst.Append(&Note{Content: "derived", DerivedFrom: bounded}); err != nil {
+		t.Fatalf("Append derived: %v", err)
+	}
+
+	// Reload and verify DerivedFrom only yields the bounded range
+	r2, err := rs.Get("dest")
+	if err != nil {
+		t.Fatalf("Get dest again: %v", err)
+	}
+	var derivedNote *Note
+	for n := range r2.Notes().Iter() {
+		derivedNote = n
+		break
+	}
+	if derivedNote == nil {
+		t.Fatal("no note found in dest")
+	}
+	if derivedNote.DerivedFrom == nil {
+		t.Fatal("DerivedFrom is nil")
+	}
+
+	var contents []string
+	for n := range derivedNote.DerivedFrom.Iter() {
+		contents = append(contents, n.Content)
+	}
+	if err := derivedNote.DerivedFrom.Err(); err != nil {
+		t.Fatalf("DerivedFrom.Err(): %v", err)
+	}
+
+	want := []string{"third", "second"}
+	if !slices.Equal(contents, want) {
+		t.Fatalf("derived notes = %v, want %v", contents, want)
+	}
+
+	// Verify derived range IDs were persisted correctly
+	loaded, _, err := s.loadNote(derivedNote.ID)
+	if err != nil {
+		t.Fatalf("loadNote: %v", err)
+	}
+	dn := loaded.DerivedFrom.(*notes)
+	if dn.tailID != ids[0] {
+		t.Fatalf("derived_tail = %d, want %d", dn.tailID, ids[0])
+	}
+	if dn.headID != ids[2] {
+		t.Fatalf("derived_head = %d, want %d", dn.headID, ids[2])
+	}
+}
+
 func TestAnonymousRef(t *testing.T) {
 	s := openTestDB(t)
 	rs := s.Refs()

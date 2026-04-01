@@ -49,31 +49,32 @@ func (s *Storage) ensureContent(tx *sql.Tx, body string) (string, error) {
 
 func (s *Storage) loadNote(id NoteID) (*Note, NoteID, error) {
 	n := &Note{ID: id}
-	var createdAt, prev, derivedTail sql.NullInt64
+	var createdAt, prev, derivedTail, derivedHead sql.NullInt64
 	if err := s.db.QueryRow(
-		"SELECT c.body, n.created_at, n.prev, n.derived_tail FROM notes n JOIN contents c ON n.content = c.hash WHERE n.id = ?",
+		"SELECT c.body, n.created_at, n.prev, n.derived_tail, n.derived_head FROM notes n JOIN contents c ON n.content = c.hash WHERE n.id = ?",
 		id,
-	).Scan(&n.Content, &createdAt, &prev, &derivedTail); err != nil {
+	).Scan(&n.Content, &createdAt, &prev, &derivedTail, &derivedHead); err != nil {
 		return nil, 0, fmt.Errorf("load note %d: %w", id, err)
 	}
 
 	n.CreatedAt = time.Unix(createdAt.Int64, 0)
 	if derivedTail.Valid {
-		n.DerivedFrom = &notes{s: s, startID: NoteID(derivedTail.Int64)}
+		n.DerivedFrom = &notes{s: s, tailID: NoteID(derivedTail.Int64), headID: NoteID(derivedHead.Int64)}
 	}
 	return n, NoteID(prev.Int64), nil
 }
 
 type notes struct {
-	s       *Storage
-	startID NoteID
-	err     error
+	s      *Storage
+	tailID NoteID
+	headID NoteID
+	err    error
 }
 
 func (ns *notes) Iter() iter.Seq[*Note] {
 	return func(yield func(*Note) bool) {
-		cur := ns.startID
-		for cur != 0 {
+
+		for cur := ns.tailID; cur != ns.headID; {
 			n, prev, err := ns.s.loadNote(cur)
 			if err != nil {
 				ns.err = err
@@ -113,13 +114,15 @@ func (r *ref) Append(n *Note) error {
 		prev = r.tailID
 	}
 
-	var derivedTail any
+	var derivedTail, derivedHead any
 	if n.DerivedFrom != nil {
-		derivedTail = n.DerivedFrom.(*notes).startID
+		dn := n.DerivedFrom.(*notes)
+		derivedTail = dn.tailID
+		derivedHead = dn.headID
 	}
 	result, err := tx.Exec(
-		"INSERT INTO notes (content, created_at, prev, derived_tail) VALUES (?, ?, ?, ?)",
-		hash, time.Now().Unix(), prev, derivedTail,
+		"INSERT INTO notes (content, created_at, prev, derived_tail, derived_head) VALUES (?, ?, ?, ?, ?)",
+		hash, n.CreatedAt.Unix(), prev, derivedTail, derivedHead,
 	)
 	if err != nil {
 		return fmt.Errorf("insert note: %w", err)
@@ -149,7 +152,7 @@ func (r *ref) Notes() Notes {
 	if r.tailID == 0 {
 		return &notes{s: r.s}
 	}
-	return &notes{s: r.s, startID: r.tailID}
+	return &notes{s: r.s, tailID: r.tailID}
 }
 
 type refs struct {
