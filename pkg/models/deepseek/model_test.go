@@ -30,7 +30,7 @@ func TestGenerateNonStream(t *testing.T) {
 	}
 
 	var text string
-	for resp, err := range m.Generate(context.Background(), req) {
+	for resp, err := range m.Generate(context.Background(), nil, req) {
 		if err != nil {
 			t.Fatalf("Generate: %v", err)
 		}
@@ -67,7 +67,7 @@ func TestGenerateStream(t *testing.T) {
 
 	var chunks int
 	var text string
-	for resp, err := range m.Generate(context.Background(), req) {
+	for resp, err := range m.Generate(context.Background(), nil, req) {
 		if err != nil {
 			t.Fatalf("Generate: %v", err)
 		}
@@ -114,7 +114,7 @@ func TestGenerateContextCancel(t *testing.T) {
 		},
 	}
 
-	for _, err := range m.Generate(ctx, req) {
+	for _, err := range m.Generate(ctx, nil, req) {
 		if err != nil {
 			return // expected: cancelled context
 		}
@@ -127,26 +127,21 @@ func TestGenerateToolCallRequired(t *testing.T) {
 		Contents: []*models.Message{
 			{Role: "user", Content: models.Content{Text: "What is the weather in Tokyo?"}},
 		},
-		Tools: map[string]any{
-			"get_weather": map[string]any{
-				"type": "object",
-				"properties": map[string]any{
-					"location": map[string]any{
-						"type":        "string",
-						"description": "City name",
-					},
-				},
-				"required": []string{"location"},
-			},
-		},
 		Config: &Config{
 			MaxTokens:  128,
 			ToolChoice: json.RawMessage(`"required"`),
 		},
 	}
 
-	var toolCalls []models.ToolCall
-	for resp, err := range m.Generate(context.Background(), req) {
+	type weatherInput struct {
+		Location string `json:"location" jsonschema_description:"City name"`
+	}
+	weatherTool := models.NewFunctionTool("get_weather", "Get the current weather for a location", func(ctx context.Context, in weatherInput) (string, error) {
+		return fmt.Sprintf("Sunny, 22°C in %s", in.Location), nil
+	})
+
+	var toolCalls []*models.ToolCall
+	for resp, err := range m.Generate(context.Background(), []models.Tool{weatherTool}, req) {
 		if err != nil {
 			t.Fatalf("Generate: %v", err)
 		}

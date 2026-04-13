@@ -3,7 +3,6 @@ package models
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"reflect"
 
@@ -17,17 +16,6 @@ type Tool interface {
 	Call(ctx context.Context, args map[string]any) (any, error)
 }
 
-func Declaration(t Tool) map[string]any {
-	return map[string]any{
-		"type": "function",
-		"function": map[string]any{
-			"name":        t.Name(),
-			"description": t.Description(),
-			"parameters":  t.ParameterSchema(),
-		},
-	}
-}
-
 type FunctionTool[In, Out any] struct {
 	name        string
 	description string
@@ -37,16 +25,12 @@ type FunctionTool[In, Out any] struct {
 func NewFunctionTool[In, Out any](
 	name, description string,
 	handler func(ctx context.Context, input In) (Out, error),
-) (*FunctionTool[In, Out], error) {
-	// Validate handler signature (already enforced by generics, but double-check)
-	if handler == nil {
-		return nil, errors.New("handler cannot be nil")
-	}
+) *FunctionTool[In, Out] {
 	return &FunctionTool[In, Out]{
 		name:        name,
 		description: description,
 		handler:     handler,
-	}, nil
+	}
 }
 
 func (ft *FunctionTool[In, Out]) Name() string        { return ft.name }

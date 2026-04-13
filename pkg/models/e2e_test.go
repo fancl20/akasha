@@ -31,7 +31,7 @@ func TestE2E_BasicGenerate(t *testing.T) {
 	}
 
 	var text string
-	for resp, err := range m.Generate(context.Background(), req) {
+	for resp, err := range m.Generate(context.Background(), nil, req) {
 		if err != nil {
 			t.Fatalf("Generate: %v", err)
 		}
@@ -56,7 +56,7 @@ func TestE2E_StreamingGenerate(t *testing.T) {
 
 	var chunks int
 	var text string
-	for resp, err := range m.Generate(context.Background(), req) {
+	for resp, err := range m.Generate(context.Background(), nil, req) {
 		if err != nil {
 			t.Fatalf("Generate: %v", err)
 		}
@@ -82,20 +82,14 @@ func TestE2E_ToolUse(t *testing.T) {
 	m := newTestModel(t)
 
 	// Define a tool using FunctionTool
-	weatherTool, err := models.NewFunctionTool("get_weather", "Get the current weather for a location", func(ctx context.Context, in weatherInput) (string, error) {
+	weatherTool := models.NewFunctionTool("get_weather", "Get the current weather for a location", func(ctx context.Context, in weatherInput) (string, error) {
 		return fmt.Sprintf("Sunny, 22°C in %s", in.Location), nil
 	})
-	if err != nil {
-		t.Fatalf("NewFunctionTool: %v", err)
-	}
 
 	// Build the request with tool declared
 	req := &models.Request{
 		Contents: []*models.Message{
 			{Role: "user", Content: models.Content{Text: "What is the weather in Paris?"}},
-		},
-		Tools: map[string]any{
-			weatherTool.Name(): weatherTool.ParameterSchema(),
 		},
 		Config: &deepseek.Config{
 			MaxTokens:  256,
@@ -104,8 +98,8 @@ func TestE2E_ToolUse(t *testing.T) {
 	}
 
 	// Step 1: Get the model's tool call
-	var toolCalls []models.ToolCall
-	for resp, err := range m.Generate(context.Background(), req) {
+	var toolCalls []*models.ToolCall
+	for resp, err := range m.Generate(context.Background(), []models.Tool{weatherTool}, req) {
 		if err != nil {
 			t.Fatalf("Generate: %v", err)
 		}
@@ -147,21 +141,18 @@ func TestE2E_ToolUse(t *testing.T) {
 			&models.Message{
 				Role: "tool",
 				Content: models.Content{
-					ToolCall: models.ToolCall{
+					ToolCall: &models.ToolCall{
 						ID: tc.ID,
 					},
 					Text: resultStr,
 				},
 			},
 		),
-		Tools: map[string]any{
-			weatherTool.Name(): weatherTool.ParameterSchema(),
-		},
 		Config: &deepseek.Config{MaxTokens: 128},
 	}
 
 	var finalText string
-	for resp, err := range m.Generate(context.Background(), req2) {
+	for resp, err := range m.Generate(context.Background(), []models.Tool{weatherTool}, req2) {
 		if err != nil {
 			t.Fatalf("second Generate: %v", err)
 		}

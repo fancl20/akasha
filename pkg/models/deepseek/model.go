@@ -70,9 +70,9 @@ func (m *DeepSeek) Name() string { return m.model }
 // Generate sends a request to the DeepSeek API and yields responses.
 // If Config.Stream is true, it yields SSE chunks as they arrive.
 // Otherwise, it yields a single response.
-func (m *DeepSeek) Generate(ctx context.Context, req *models.Request) iter.Seq2[*models.Response, error] {
+func (m *DeepSeek) Generate(ctx context.Context, tools []models.Tool, req *models.Request) iter.Seq2[*models.Response, error] {
 	return func(yield func(*models.Response, error) bool) {
-		dsReq, err := convertRequest(req, m.model)
+		dsReq, err := convertRequest(m.model, tools, req)
 		if err != nil {
 			yield(nil, fmt.Errorf("convert request: %w", err))
 			return
@@ -145,7 +145,7 @@ func (m *DeepSeek) streamResponse(body io.Reader, yield func(*models.Response, e
 					Messages: []*models.Message{{
 						Role: "assistant",
 						Content: models.Content{
-							ToolCall: models.ToolCall{
+							ToolCall: &models.ToolCall{
 								ID:   tc.id,
 								Name: tc.name,
 								Args: args,
@@ -217,7 +217,7 @@ func (m *DeepSeek) streamResponse(body io.Reader, yield func(*models.Response, e
 						Messages: []*models.Message{{
 							Role: "assistant",
 							Content: models.Content{
-								ToolCall: models.ToolCall{
+								ToolCall: &models.ToolCall{
 									ID:   tc.id,
 									Name: tc.name,
 									Args: args,
@@ -262,16 +262,21 @@ func (m *DeepSeek) nonStreamResponse(body io.Reader, yield func(*models.Response
 	}
 }
 
-func convertRequest(req *models.Request, defaultModel string) (*ChatCompletionRequest, error) {
+func convertRequest(defaultModel string, tools []models.Tool, req *models.Request) (*ChatCompletionRequest, error) {
 	model := defaultModel
 	if req.Model != "" {
 		model = req.Model
 	}
 
+	ts, err := convertTools(tools)
+	if err != nil {
+		return nil, err
+	}
+
 	dsReq := &ChatCompletionRequest{
 		Model:    model,
 		Messages: convertMessages(req.Contents),
-		Tools:    convertTools(req.Tools),
+		Tools:    ts,
 	}
 
 	if req.Config != nil {
@@ -314,7 +319,7 @@ func convertMessages(msgs []*models.Message) []Message {
 			m.Content = msg.Content.Text
 		}
 
-		if tc := msg.Content.ToolCall; tc.ID != "" {
+		if tc := msg.Content.ToolCall; tc != nil {
 			argsJSON, _ := json.Marshal(tc.Args)
 			m.ToolCalls = append(m.ToolCalls, ToolCall{
 				ID:   tc.ID,
@@ -336,25 +341,23 @@ func convertMessages(msgs []*models.Message) []Message {
 	return result
 }
 
-func convertTools(tools map[string]any) []Tool {
-	if len(tools) == 0 {
-		return nil
-	}
+func convertTools(tools []models.Tool) ([]Tool, error) {
 	result := make([]Tool, 0, len(tools))
-	for name, params := range tools {
-		paramsJSON, err := json.Marshal(params)
+	for _, t := range tools {
+		schema, err := json.Marshal(t.ParameterSchema())
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("marshal tool: %q, %w", t.Name(), err)
 		}
 		result = append(result, Tool{
 			Type: "function",
 			Function: FunctionDefinition{
-				Name:       name,
-				Parameters: paramsJSON,
+				Name:        t.Name(),
+				Description: t.Description(),
+				Parameters:  schema,
 			},
 		})
 	}
-	return result
+	return result, nil
 }
 
 func convertMessage(msg Message) *models.Response {
@@ -379,7 +382,7 @@ func convertMessage(msg Message) *models.Response {
 		msgs = append(msgs, &models.Message{
 			Role: msg.Role,
 			Content: models.Content{
-				ToolCall: models.ToolCall{
+				ToolCall: &models.ToolCall{
 					ID:   tc.ID,
 					Name: tc.Function.Name,
 					Args: args,
