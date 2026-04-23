@@ -3,6 +3,7 @@ package workflows
 import (
 	"fmt"
 
+	"github.com/fancl20/akasha/pkg/messages"
 	"github.com/fancl20/akasha/pkg/models"
 	"github.com/fancl20/akasha/pkg/notes"
 	"go.temporal.io/sdk/client"
@@ -15,9 +16,10 @@ type WorkerConfig struct {
 	Refs      notes.Refs
 	Model     models.Model
 	Tools     []models.Tool
+	Channel   messages.Channel
 }
 
-// NewWorker creates a Temporal worker that registers the AgentWorkflow and all activities.
+// NewWorker creates a Temporal worker that registers the SessionTurnWorkflow and all activities.
 // The caller is responsible for managing the temporalClient lifecycle.
 func NewWorker(temporalClient client.Client, cfg WorkerConfig) (worker.Worker, error) {
 	if cfg.TaskQueue == "" {
@@ -29,12 +31,16 @@ func NewWorker(temporalClient client.Client, cfg WorkerConfig) (worker.Worker, e
 	if cfg.Model == nil {
 		return nil, fmt.Errorf("model is required")
 	}
+	if cfg.Channel == nil {
+		return nil, fmt.Errorf("channel is required")
+	}
 
 	w := worker.New(temporalClient, cfg.TaskQueue, worker.Options{})
 
-	w.RegisterWorkflow(AgentWorkflow)
+	w.RegisterWorkflow(SessionWorkflow)
+	w.RegisterWorkflow(SessionTurnWorkflow)
 
-	acts := &Activities{
+	acts := &ModelActivities{
 		Refs:  cfg.Refs,
 		Model: cfg.Model,
 		Tools: cfg.Tools,
@@ -43,6 +49,10 @@ func NewWorker(temporalClient client.Client, cfg WorkerConfig) (worker.Worker, e
 	w.RegisterActivity(acts.GetNotes)
 	w.RegisterActivity(acts.Generate)
 	w.RegisterActivity(acts.ToolCall)
+
+	msgActs := &MessageActivities{Channel: cfg.Channel}
+	w.RegisterActivity(msgActs.SendMessage)
+	w.RegisterActivity(msgActs.ReceiveMessage)
 
 	return w, nil
 }
