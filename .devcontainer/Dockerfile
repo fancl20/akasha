@@ -11,9 +11,7 @@ RUN echo "coder ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/coder && \
     chmod 440 /etc/sudoers.d/coder
 
 RUN apt-get install -y \
-    python3 golang
-
-RUN curl -sSf 'https://temporal.download/cli/archive/latest?platform=linux&arch=amd64' | tar -C /usr/local/bin -xz
+    python3 rustc rust-src cargo
 
 # Clean up
 RUN rm -rf /tmp/* /var/tmp/* /var/lib/apt/lists/*
