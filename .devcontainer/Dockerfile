@@ -11,7 +11,7 @@ RUN echo "coder ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/coder && \
     chmod 440 /etc/sudoers.d/coder
 
 RUN apt-get install -y \
-    python3 rustc rust-src cargo
+    python3 rustc rust-src cargo rustfmt
 
 # Clean up
 RUN rm -rf /tmp/* /var/tmp/* /var/lib/apt/lists/*
