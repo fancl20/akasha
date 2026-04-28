@@ -2,12 +2,22 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ContentBlock {
-    Text { content: String },
-    Reasoning { content: String },
-    ToolCall { id: String, name: String, arguments: serde_json::Value },
-    ToolResult { tool_call_id: String, content: String },
+    Text {
+        content: String,
+    },
+    Reasoning {
+        content: String,
+    },
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: serde_json::Value,
+    },
+    ToolResult {
+        tool_call_id: String,
+        content: String,
+    },
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -22,13 +32,6 @@ pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub parameters: JsonSchema,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToolResult {
-    pub tool_call_id: String,
-    pub content: Vec<ContentBlock>,
-    pub details: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

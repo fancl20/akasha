@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "mcp__web-reader__webReader",
-      "Bash(cargo test *)"
+      "Bash(cargo test *)",
+      "Bash(cargo check *)",
+      "Bash(cargo build *)"
     ]
   }
 }

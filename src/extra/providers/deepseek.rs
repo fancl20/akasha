@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
 
-use crate::core::provider::{Model, Provider, ProviderError, StreamResponse, StreamResponseStream};
+use crate::core::providers::{
+    Model, Provider, ProviderError, StreamResponse, StreamResponseStream,
+};
 use crate::core::types::{ContentBlock, Message, Request, TokenUsage};
 
 const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
@@ -36,6 +38,8 @@ enum ApiMessage {
     Assistant {
         #[serde(skip_serializing_if = "Option::is_none")]
         content: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         tool_calls: Option<Vec<ApiToolCall>>,
     },
@@ -104,6 +108,7 @@ struct ChunkToolCall {
     index: usize,
     #[serde(default)]
     id: Option<String>,
+    #[allow(dead_code)]
     #[serde(default)]
     r#type: Option<String>,
     #[serde(default)]
@@ -124,6 +129,7 @@ struct ChunkUsage {
     completion_tokens: u64,
     #[serde(default)]
     prompt_cache_hit_tokens: Option<u64>,
+    #[allow(dead_code)]
     #[serde(default)]
     prompt_cache_miss_tokens: Option<u64>,
 }
@@ -143,11 +149,16 @@ fn build_messages(context: &Request) -> Vec<ApiMessage> {
             }
             "assistant" => {
                 let text = extract_text(&msg.content);
+                let reasoning = extract_reasoning(&msg.content);
                 let api_tcs: Vec<ApiToolCall> = msg
                     .content
                     .iter()
                     .filter_map(|b| match b {
-                        ContentBlock::ToolCall { id, name, arguments } => Some(ApiToolCall {
+                        ContentBlock::ToolCall {
+                            id,
+                            name,
+                            arguments,
+                        } => Some(ApiToolCall {
                             id: id.clone(),
                             r#type: "function".to_string(),
                             function: ApiFunctionCall {
@@ -160,6 +171,11 @@ fn build_messages(context: &Request) -> Vec<ApiMessage> {
                     .collect();
                 messages.push(ApiMessage::Assistant {
                     content: if text.is_empty() { None } else { Some(text) },
+                    reasoning_content: if reasoning.is_empty() {
+                        None
+                    } else {
+                        Some(reasoning)
+                    },
                     tool_calls: if api_tcs.is_empty() {
                         None
                     } else {
@@ -169,7 +185,11 @@ fn build_messages(context: &Request) -> Vec<ApiMessage> {
             }
             "tool" => {
                 for block in &msg.content {
-                    if let ContentBlock::ToolResult { tool_call_id, content } = block {
+                    if let ContentBlock::ToolResult {
+                        tool_call_id,
+                        content,
+                    } = block
+                    {
                         messages.push(ApiMessage::Tool {
                             content: content.clone(),
                             tool_call_id: tool_call_id.clone(),
@@ -215,6 +235,17 @@ fn extract_text(blocks: &[ContentBlock]) -> String {
         .join("")
 }
 
+fn extract_reasoning(blocks: &[ContentBlock]) -> String {
+    blocks
+        .iter()
+        .filter_map(|b| match b {
+            ContentBlock::Reasoning { content } => Some(content.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("")
+}
+
 struct PartialToolCall {
     id: String,
     name: String,
@@ -251,7 +282,7 @@ async fn process_sse(
             };
 
             if data == "[DONE]" {
-                emit_done(&mut tx, &accumulated_text, &final_tool_calls, &last_usage).await;
+                emit_done(&mut tx, &accumulated_text, &last_usage).await;
                 return;
             }
 
@@ -279,7 +310,12 @@ async fn process_sse(
                                     role: "assistant".to_string(),
                                     content: vec![ContentBlock::Text { content }],
                                 },
-                                usage: TokenUsage { input_tokens: 0, output_tokens: 0, cache_read_tokens: None, cache_write_tokens: None },
+                                usage: TokenUsage {
+                                    input_tokens: 0,
+                                    output_tokens: 0,
+                                    cache_read_tokens: None,
+                                    cache_write_tokens: None,
+                                },
                                 stop_reason: None,
                             })
                             .await;
@@ -294,7 +330,12 @@ async fn process_sse(
                                     role: "assistant".to_string(),
                                     content: vec![ContentBlock::Reasoning { content: reasoning }],
                                 },
-                                usage: TokenUsage { input_tokens: 0, output_tokens: 0, cache_read_tokens: None, cache_write_tokens: None },
+                                usage: TokenUsage {
+                                    input_tokens: 0,
+                                    output_tokens: 0,
+                                    cache_read_tokens: None,
+                                    cache_write_tokens: None,
+                                },
                                 stop_reason: None,
                             })
                             .await;
@@ -303,13 +344,14 @@ async fn process_sse(
 
                 if let Some(tc_deltas) = choice.delta.tool_calls {
                     for tc in tc_deltas {
-                        let entry = partial_tools.entry(tc.index).or_insert_with(|| {
-                            PartialToolCall {
-                                id: String::new(),
-                                name: String::new(),
-                                arguments: String::new(),
-                            }
-                        });
+                        let entry =
+                            partial_tools
+                                .entry(tc.index)
+                                .or_insert_with(|| PartialToolCall {
+                                    id: String::new(),
+                                    name: String::new(),
+                                    arguments: String::new(),
+                                });
                         if let Some(id) = tc.id {
                             entry.id = id;
                         }
@@ -326,23 +368,28 @@ async fn process_sse(
                     let indices: Vec<usize> = partial_tools.keys().copied().collect();
                     for idx in indices {
                         if let Some(ptc) = partial_tools.remove(&idx) {
-                            let args =
-                                serde_json::from_str(&ptc.arguments)
-                                    .unwrap_or(serde_json::Value::Null);
+                            let args = serde_json::from_str(&ptc.arguments)
+                                .unwrap_or(serde_json::Value::Null);
                             let tc = ContentBlock::ToolCall {
                                 id: ptc.id,
                                 name: ptc.name,
                                 arguments: args,
                             };
-                            let _ =
-                                tx.send(StreamResponse {
+                            let _ = tx
+                                .send(StreamResponse {
                                     message: Message {
                                         role: "assistant".to_string(),
                                         content: vec![tc.clone()],
                                     },
-                                    usage: TokenUsage { input_tokens: 0, output_tokens: 0, cache_read_tokens: None, cache_write_tokens: None },
+                                    usage: TokenUsage {
+                                        input_tokens: 0,
+                                        output_tokens: 0,
+                                        cache_read_tokens: None,
+                                        cache_write_tokens: None,
+                                    },
                                     stop_reason: Some("tool_calls".to_string()),
-                                }).await;
+                                })
+                                .await;
                             final_tool_calls.push(tc);
                         }
                     }
@@ -351,13 +398,12 @@ async fn process_sse(
         }
     }
 
-    emit_done(&mut tx, &accumulated_text, &final_tool_calls, &last_usage).await;
+    emit_done(&mut tx, &accumulated_text, &last_usage).await;
 }
 
 async fn emit_done(
     tx: &mut futures::channel::mpsc::Sender<StreamResponse>,
     text: &str,
-    tool_calls: &[ContentBlock],
     usage: &Option<TokenUsage>,
 ) {
     let mut content: Vec<ContentBlock> = Vec::new();
@@ -366,7 +412,6 @@ async fn emit_done(
             content: text.to_owned(),
         });
     }
-    content.extend(tool_calls.iter().cloned());
 
     let message = Message {
         role: "assistant".to_string(),
@@ -380,11 +425,13 @@ async fn emit_done(
         cache_write_tokens: None,
     });
 
-    let _ = tx.send(StreamResponse {
-        message,
-        usage,
-        stop_reason: Some("stop".to_string()),
-    }).await;
+    let _ = tx
+        .send(StreamResponse {
+            message,
+            usage,
+            stop_reason: Some("stop".to_string()),
+        })
+        .await;
 }
 
 #[async_trait]
@@ -438,10 +485,7 @@ impl Provider for DeepSeekProvider {
             }
             s if !s.is_success() => {
                 let body = response.text().await.unwrap_or_default();
-                return Err(ProviderError::RequestFailed(format!(
-                    "{}: {}",
-                    s, body
-                )));
+                return Err(ProviderError::RequestFailed(format!("{}: {}", s, body)));
             }
             _ => {}
         }
@@ -466,16 +510,14 @@ impl Provider for DeepSeekProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::provider::{Model, Provider};
+    use crate::core::extensions::{Extension, NoopExtension};
+    use crate::core::providers::{Model, Provider, Registry};
+    use crate::core::tools::{ToolHandler, ToolRegistry};
     use crate::core::types::{ContentBlock, Message, Request, ToolDefinition};
     use futures::StreamExt;
 
     fn api_key() -> Option<String> {
         std::env::var("DEEPSEEK_API_KEY").ok()
-    }
-
-    fn provider() -> DeepSeekProvider {
-        DeepSeekProvider::new(api_key().expect("DEEPSEEK_API_KEY not set"))
     }
 
     fn test_model() -> Model {
@@ -629,7 +671,10 @@ mod tests {
         let stream = provider.stream(&model, &req).await.unwrap();
         let responses = collect_stream(stream).await;
 
-        assert!(!responses.is_empty(), "should receive at least one response");
+        assert!(
+            !responses.is_empty(),
+            "should receive at least one response"
+        );
 
         let combined_text: String = responses
             .iter()
@@ -712,11 +757,15 @@ mod tests {
             }],
         };
 
-        let stream = provider.stream(&model, &req).await.unwrap();
+        let stream: Pin<Box<dyn Stream<Item = StreamResponse> + Send>> =
+            provider.stream(&model, &req).await.unwrap();
         let responses = collect_stream(stream).await;
 
         let has_tool_call = responses.iter().any(|r| {
-            r.message.content.iter().any(|b| matches!(b, ContentBlock::ToolCall { .. }))
+            r.message
+                .content
+                .iter()
+                .any(|b| matches!(b, ContentBlock::ToolCall { .. }))
         });
         assert!(has_tool_call, "model should return a tool call");
     }
@@ -749,5 +798,151 @@ mod tests {
 
         let result = provider.stream(&model, &req).await;
         assert!(result.is_err(), "unknown model should return an error");
+    }
+
+    // --- E2E test: agent run with tool-use chain ---
+
+    struct GetCurrentLocationTool;
+
+    #[async_trait]
+    impl ToolHandler for GetCurrentLocationTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "get_current_location".to_string(),
+                description: "Get the user's current city and country.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }),
+            }
+        }
+
+        async fn execute(
+            &self,
+            _cancel: tokio::sync::watch::Receiver<bool>,
+            _params: serde_json::Value,
+        ) -> Result<String, crate::core::tools::ToolError> {
+            Ok(serde_json::json!({
+                "city": "San Francisco",
+                "country": "US"
+            })
+            .to_string())
+        }
+    }
+
+    struct GetWeatherByLocationTool;
+
+    #[async_trait]
+    impl ToolHandler for GetWeatherByLocationTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "get_weather_by_location".to_string(),
+                description: "Get the current weather for a given location.".to_string(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "city": { "type": "string", "description": "City name" },
+                        "country": { "type": "string", "description": "Country code" }
+                    },
+                    "required": ["city"]
+                }),
+            }
+        }
+
+        async fn execute(
+            &self,
+            _cancel: tokio::sync::watch::Receiver<bool>,
+            _params: serde_json::Value,
+        ) -> Result<String, crate::core::tools::ToolError> {
+            Ok(serde_json::json!({
+                "temperature": "18°C",
+                "condition": "Foggy",
+                "humidity": "82%"
+            })
+            .to_string())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_e2e_agent_tool_chain() {
+        let key = match api_key() {
+            Some(k) => k,
+            None => return,
+        };
+
+        let mut registry = Registry::new();
+        registry.register("deepseek", Box::new(DeepSeekProvider::new(key)));
+
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(GetCurrentLocationTool));
+        tools.register(Box::new(GetWeatherByLocationTool));
+
+        let model = test_model();
+        let request = Request {
+            messages: vec![Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text {
+                    content: "What's the weather at my current location? Use the available tools to find out.".to_string(),
+                }],
+            }],
+            tools: tools.definitions(),
+        };
+
+        let extension = Box::new(NoopExtension) as Box<dyn Extension>;
+        let output = crate::core::agent::run(&request, &model, &registry, &tools, &extension)
+            .await
+            .expect("agent run should succeed");
+
+        // The agent should produce at least 3 messages:
+        //   1) assistant with get_current_location tool call
+        //   2) tool result for get_current_location
+        //   3) assistant with get_weather_by_location tool call
+        //   4) tool result for get_weather_by_location
+        //   5) assistant with final text answer
+        assert!(
+            output.len() >= 3,
+            "agent should produce multiple messages (tool calls + result), got {}",
+            output.len()
+        );
+
+        // Verify get_current_location was called
+        let called_get_location = output.iter().any(|msg| {
+            msg.content.iter().any(|b| {
+                matches!(
+                    b,
+                    ContentBlock::ToolCall { name, .. } if name == "get_current_location"
+                )
+            })
+        });
+        assert!(
+            called_get_location,
+            "agent should have called get_current_location"
+        );
+
+        // Verify get_weather_by_location was called
+        let called_get_weather = output.iter().any(|msg| {
+            msg.content.iter().any(|b| {
+                matches!(
+                    b,
+                    ContentBlock::ToolCall { name, .. } if name == "get_weather_by_location"
+                )
+            })
+        });
+        assert!(
+            called_get_weather,
+            "agent should have called get_weather_by_location"
+        );
+
+        // Verify the final message is a text response from the assistant
+        let last = output.last().expect("should have output");
+        let has_text = last
+            .content
+            .iter()
+            .any(|b| matches!(b, ContentBlock::Text { .. }));
+        assert!(
+            has_text && last.role == "assistant",
+            "final message should be assistant text with weather info"
+        );
     }
 }
