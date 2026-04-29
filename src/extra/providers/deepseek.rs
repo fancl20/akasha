@@ -883,7 +883,8 @@ mod tests {
             messages: vec![Message {
                 role: "user".to_string(),
                 content: vec![ContentBlock::Text {
-                    content: "What's the weather at my current location? Use the available tools to find out.".to_string(),
+                    content: "What's the weather at my current location? Use the available tools to find out."
+                        .to_string(),
                 }],
             }],
             tools: tools.definitions(),
