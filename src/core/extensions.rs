@@ -33,8 +33,8 @@ pub trait Extension: Send + Sync {
 
     async fn on_tool_call(
         &self,
-        _name: String,
-        _arguments: String,
+        _name: &str,
+        _args: &[&str],
     ) -> Result<ToolCallDecision, ExtensionError> {
         Ok(ToolCallDecision::Allow)
     }

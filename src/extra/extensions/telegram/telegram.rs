@@ -50,7 +50,6 @@ impl TelegramExtension {
 /// Background task: receives chunks from the channel, batches them,
 /// and flushes to Telegram with throttling.
 async fn edit_loop(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<StreamEvent>) {
-    let mut sending = String::new();
     let mut pending = String::new();
     let mut message_id = None;
     let mut wait_until = SystemTime::UNIX_EPOCH;
@@ -81,43 +80,35 @@ async fn edit_loop(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<St
         }
 
         while !pending.trim().is_empty() {
-            let limit = pending.floor_char_boundary(4096 - sending.len());
-            match pending[..pending.floor_char_boundary(limit)].rfind("\n") {
-                Some(idx) => {
-                    sending.push_str(&pending[..idx]);
-                    pending = pending[idx + 1..].to_owned();
-                }
-                None if pending.len() < limit => {
-                    sending.push_str(&pending);
-                    pending.clear();
-                }
-                None if sending.is_empty() => {
-                    (sending, pending) = {
-                        let (s1, s2) = pending.split_at(pending.floor_char_boundary(4096));
-                        (s1.to_owned(), s2.to_owned())
-                    };
-                }
-                _ => {
-                    message_id = None;
-                    sending.clear();
-                    continue;
-                }
-            }
+            let end = pending
+                .char_indices()
+                .nth(4095)
+                .map(|(i, c)| i + c.len_utf8());
+            let boundary = pending[..end.unwrap_or(pending.len())]
+                .rfind("\n")
+                .map(|i| i + 1)
+                .or(end)
+                .unwrap_or(pending.len());
 
-            if let Some(id) = message_id {
-                match bot.edit_message_text(chat_id, id, &sending).await {
+            match (message_id, pending[..boundary].trim()) {
+                (_, "") => (),
+                (Some(id), sending) => match bot.edit_message_text(chat_id, id, sending).await {
                     Ok(_) | Err(RequestError::Api(ApiError::MessageNotModified)) => (),
                     Err(e) => eprintln!("telegram edit error: {e}"),
-                }
-            } else {
-                match bot.send_message(chat_id, &sending).await {
+                },
+                (None, sending) => match bot.send_message(chat_id, sending).await {
                     Ok(msg) => message_id = Some(msg.id),
                     Err(e) => eprintln!("telegram send error: {e}"),
-                }
+                },
             }
             wait_until = SystemTime::now() + Duration::from_secs(4);
 
-            if finish_tx.is_none() {
+            if end.is_some() {
+                message_id = None;
+                pending = pending[boundary..].to_owned();
+            }
+
+            if finish_tx.is_none() || end.is_none() {
                 break;
             }
         }
@@ -131,7 +122,7 @@ async fn edit_loop(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<St
         // Prepare the next turn.
         if let Some(tx) = finish_tx {
             message_id = None;
-            sending.clear();
+            pending.clear();
             let _ = tx.send(Ok(()));
         }
     }
@@ -177,7 +168,7 @@ struct ChatState {
     extension: Option<TelegramExtension>,
 }
 
-type MyDialogue = Dialogue<ChatState, InMemStorage<ChatState>>;
+type AgentDialogue = Dialogue<ChatState, InMemStorage<ChatState>>;
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Bot commands")]
@@ -192,7 +183,7 @@ type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 async fn command_handler(
     bot: Bot,
-    dialogue: MyDialogue,
+    dialogue: AgentDialogue,
     msg: TgMessage,
     cmd: Command,
 ) -> HandlerResult {
@@ -212,7 +203,7 @@ async fn command_handler(
 
 async fn handle_message(
     bot: Bot,
-    dialogue: MyDialogue,
+    dialogue: AgentDialogue,
     msg: TgMessage,
     model: Arc<Model>,
     models: Arc<Registry>,
