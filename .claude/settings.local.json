@@ -1,10 +1,13 @@
 {
   "permissions": {
     "allow": [
+      "WebSearch",
       "mcp__web-reader__webReader",
+      "mcp__zread__get_repo_structure",
       "Bash(cargo test *)",
       "Bash(cargo check *)",
-      "Bash(cargo build *)"
+      "Bash(cargo build *)",
+      "Bash(cargo tree *)"
     ]
   }
 }

@@ -18,7 +18,7 @@ struct Cli {
     #[arg(long)]
     base_url: Option<String>,
     #[arg(long, value_delimiter = ',')]
-    allowed_users: Vec<u64>,
+    allowed_ids: Vec<u64>,
 
     #[arg(long, env = "DEEPSEEK_API_KEY", hide_env_values = true)]
     deepseek: Option<String>,
@@ -54,11 +54,11 @@ async fn main() {
         provider: provider,
         context_window: 384_000,
         base_url: base_url.unwrap_or_default(),
-        headers: HashMap::new(),
+        headers: HashMap::from([("reasoning_effort".into(), "max".into())]),
     };
 
     let tools = ToolRegistry::new();
-    let allowed_users: HashSet<u64> = cli.allowed_users.into_iter().collect();
+    let allowed_ids: HashSet<u64> = cli.allowed_ids.into_iter().collect();
 
-    telegram::run(cli.telegram_token, model, models, tools, allowed_users).await;
+    telegram::run(cli.telegram_token, model, models, tools, allowed_ids).await;
 }
