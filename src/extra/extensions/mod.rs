@@ -1,4 +1,2 @@
-pub mod pipeline;
+pub mod combinator;
 pub mod telegram;
-
-pub use pipeline::Pipeline;

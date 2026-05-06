@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use crate::core::types::ToolDefinition;
 
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum ToolError {
     #[error("validation error: {0}")]
     Validation(String),
