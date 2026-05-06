@@ -879,21 +879,33 @@ mod tests {
         tools.register(Box::new(GetWeatherByLocationTool));
 
         let model = test_model();
-        let request = Request {
-            messages: vec![Message {
-                role: "user".to_string(),
-                content: vec![ContentBlock::Text {
-                    content: "What's the weather at my current location? Use the available tools to find out."
-                        .to_string(),
-                }],
-            }],
-            tools: tools.definitions(),
-        };
 
         let extension = Box::new(NoopExtension) as Box<dyn Extension>;
-        let output = crate::core::agent::run(&request, &model, &registry, &tools, &extension)
+        let agent_state = crate::core::agent::AgentState {
+            model,
+            tools,
+            messages: vec![],
+        };
+        let mut agent = crate::core::agent::Agent {
+            state: agent_state,
+            models: std::sync::Arc::new(registry),
+            extension,
+        };
+
+        let user_msg = Message {
+            role: "user".into(),
+            content: vec![ContentBlock::Text {
+                content: "What's the weather at my current location? Use the available tools to find out."
+                    .to_string(),
+            }],
+        };
+
+        agent
+            .prompt(user_msg)
             .await
             .expect("agent run should succeed");
+
+        let output = agent.state.messages;
 
         // The agent should produce at least 3 messages:
         //   1) assistant with get_current_location tool call

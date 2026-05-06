@@ -1,6 +1,8 @@
 use async_trait::async_trait;
 
-use crate::core::StreamResponse;
+use crate::core::agent::AgentState;
+use crate::core::providers::StreamResponse;
+use crate::core::tools::ToolError;
 use crate::core::types::Request;
 
 pub enum ToolCallDecision {
@@ -18,25 +20,53 @@ pub enum ExtensionError {
 pub trait Extension: Send + Sync {
     fn name(&self) -> &str;
 
+    async fn on_agent_start(&self, _state: AgentState) -> Result<AgentState, ExtensionError> {
+        Ok(_state)
+    }
+
     #[allow(unused_mut)]
-    async fn on_request(&self, mut request: Request) -> Result<Request, ExtensionError> {
-        Ok(request)
+    async fn on_agent_end(&self, _state: AgentState) -> Result<AgentState, ExtensionError> {
+        Ok(_state)
     }
 
-    async fn on_response_chunk(&self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
+    #[allow(unused_mut)]
+    async fn on_turn_start(&self, _state: AgentState) -> Result<AgentState, ExtensionError> {
+        Ok(_state)
+    }
+
+    #[allow(unused_mut)]
+    async fn on_turn_end(&self, _state: AgentState) -> Result<AgentState, ExtensionError> {
+        Ok(_state)
+    }
+
+    #[allow(unused_mut)]
+    async fn on_message_start(&self, _req: Request) -> Result<Request, ExtensionError> {
+        Ok(_req)
+    }
+
+    async fn on_message_update(&self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
         Ok(())
     }
 
-    async fn on_response(&self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
+    async fn on_message_end(&self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
         Ok(())
     }
 
-    async fn on_tool_call(
+    async fn on_tool_execution_start(
         &self,
+        _tool_call_id: &str,
         _name: &str,
-        _args: &[&str],
+        _args: &serde_json::Value,
     ) -> Result<ToolCallDecision, ExtensionError> {
         Ok(ToolCallDecision::Allow)
+    }
+
+    async fn tool_execution_end(
+        &self,
+        _tool_call_id: &str,
+        _result: Result<String, ToolError>,
+    ) -> Result<Result<String, ToolError>, ExtensionError> {
+        Ok(_result)
     }
 }
 

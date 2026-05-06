@@ -10,11 +10,11 @@ use teloxide::utils::command::BotCommands;
 use teloxide::{ApiError, Bot, RequestError, dptree};
 use tokio::sync::{mpsc, oneshot};
 
-use crate::core::agent;
+use crate::core::agent::{Agent, AgentState};
 use crate::core::extensions::{Extension, ExtensionError};
 use crate::core::providers::{Model, Registry, StreamResponse};
 use crate::core::tools::ToolRegistry;
-use crate::core::types::{ContentBlock, Message, Request};
+use crate::core::types::{ContentBlock, Message};
 
 enum StreamEvent {
     Append(ContentBlock),
@@ -134,7 +134,7 @@ impl Extension for TelegramExtension {
         "telegram"
     }
 
-    async fn on_response_chunk(&self, chunk: &StreamResponse) -> Result<(), ExtensionError> {
+    async fn on_message_update(&self, chunk: &StreamResponse) -> Result<(), ExtensionError> {
         for block in &chunk.message.content {
             self.tx
                 .send(StreamEvent::Append(block.clone()))
@@ -147,7 +147,7 @@ impl Extension for TelegramExtension {
         Ok(())
     }
 
-    async fn on_response(&self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
+    async fn on_message_end(&self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
         let (done_tx, done_rx) = oneshot::channel();
         self.tx.send(StreamEvent::Finish(done_tx)).map_err(|_| {
             ExtensionError::ExtensionFailed {
@@ -218,28 +218,31 @@ async fn handle_message(
 
     let mut state = dialogue.get_or_default().await?;
 
-    state.messages.push(Message {
+    let ext = state
+        .extension
+        .get_or_insert_with(|| TelegramExtension::new(bot.clone(), chat_id))
+        .clone();
+
+    let mut agent = Agent {
+        state: AgentState {
+            model: (*model).clone(),
+            tools: (*tools).clone(),
+            messages: state.messages.clone(),
+        },
+        models: Arc::clone(&models),
+        extension: Box::new(ext),
+    };
+
+    let user_msg = Message {
         role: "user".into(),
         content: vec![ContentBlock::Text {
             content: text.to_owned(),
         }],
-    });
-
-    let request = Request {
-        messages: state.messages.clone(),
-        tools: tools.definitions(),
     };
 
-    let ext: Box<dyn Extension> = Box::new(
-        state
-            .extension
-            .get_or_insert_with(|| TelegramExtension::new(bot.clone(), chat_id))
-            .clone(),
-    );
-
-    match agent::run(&request, &model, &*models, &*tools, &ext).await {
-        Ok(new_messages) => {
-            state.messages.extend(new_messages);
+    match agent.prompt(user_msg).await {
+        Ok(()) => {
+            state.messages = agent.state.messages;
             dialogue.update(state).await?;
         }
         Err(e) => {

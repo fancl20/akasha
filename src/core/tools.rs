@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::core::types::ToolDefinition;
 
@@ -24,8 +25,9 @@ pub trait ToolHandler: Send + Sync {
     ) -> Result<String, ToolError>;
 }
 
+#[derive(Clone)]
 pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn ToolHandler>>,
+    tools: HashMap<String, Arc<dyn ToolHandler>>,
 }
 
 impl ToolRegistry {
@@ -37,7 +39,7 @@ impl ToolRegistry {
 
     pub fn register(&mut self, handler: Box<dyn ToolHandler>) {
         let def = handler.definition();
-        self.tools.insert(def.name, handler);
+        self.tools.insert(def.name, Arc::from(handler));
     }
 
     pub fn get(&self, name: &str) -> Option<&dyn ToolHandler> {

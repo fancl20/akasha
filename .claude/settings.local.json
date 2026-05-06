@@ -4,10 +4,12 @@
       "WebSearch",
       "mcp__web-reader__webReader",
       "mcp__zread__get_repo_structure",
+      "mcp__zread__read_file",
       "Bash(cargo test *)",
       "Bash(cargo check *)",
       "Bash(cargo build *)",
-      "Bash(cargo tree *)"
+      "Bash(cargo tree *)",
+      "mcp__zread__search_doc"
     ]
   }
 }
