@@ -1,7 +1,11 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
+use akasha::core::agent::{Agent, AgentState};
+use akasha::core::extensions::NoopExtension;
 use akasha::core::providers::{Model, Registry};
 use akasha::core::tools::ToolRegistry;
+use akasha::core::types::{ContentBlock, Message};
 use akasha::extra::extensions::telegram;
 use akasha::extra::providers::deepseek::DeepSeekProvider;
 use clap::Parser;
@@ -56,9 +60,29 @@ async fn main() {
         base_url: base_url.unwrap_or_default(),
         headers: HashMap::from([("reasoning_effort".into(), "max".into())]),
     };
-
     let tools = ToolRegistry::new();
     let allowed_ids: HashSet<u64> = cli.allowed_ids.into_iter().collect();
+    let models = Arc::new(models);
 
-    telegram::run(cli.telegram_token, model, models, tools, allowed_ids).await;
+    let prompt = Message {
+        role: "user".into(),
+        content: vec![ContentBlock::Text {
+            content: "use tools to assist user and respond concisely for readability on phone. keep the tone dry and neutral.".into(),
+        }],
+    };
+
+    telegram::dispatch(
+        cli.telegram_token,
+        allowed_ids,
+        Arc::new(move || Agent {
+            state: AgentState {
+                model: model.clone(),
+                tools: tools.clone(),
+                messages: vec![prompt.clone()],
+            },
+            models: models.clone(),
+            extension: Box::new(NoopExtension),
+        }),
+    )
+    .await;
 }

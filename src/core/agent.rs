@@ -28,6 +28,7 @@ pub struct AgentState {
     pub tools: ToolRegistry,
     pub messages: Vec<Message>,
 }
+
 pub struct Agent {
     pub state: AgentState,
     pub models: Arc<Registry>,

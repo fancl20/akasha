@@ -1,5 +1,5 @@
-pub mod and;
-pub mod or;
+mod and;
+mod or;
 
 pub use and::And;
 pub use or::Or;

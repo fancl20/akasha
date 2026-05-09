@@ -53,7 +53,7 @@ impl Extension for LabelExt {
         self.label
     }
 
-    async fn on_message_start(&self, mut req: Request) -> Result<Request, ExtensionError> {
+    async fn on_message_start(&mut self, mut req: Request) -> Result<Request, ExtensionError> {
         if self.should_fail {
             return Err(ExtensionError::ExtensionFailed {
                 name: self.label.to_string(),
@@ -71,7 +71,7 @@ impl Extension for LabelExt {
         Ok(req)
     }
 
-    async fn on_agent_start(&self, state: AgentState) -> Result<AgentState, ExtensionError> {
+    async fn on_agent_start(&mut self, state: AgentState) -> Result<AgentState, ExtensionError> {
         self.record("on_agent_start");
         if self.should_fail {
             return Err(ExtensionError::ExtensionFailed {
@@ -83,7 +83,7 @@ impl Extension for LabelExt {
     }
 
     async fn on_tool_execution_start(
-        &self,
+        &mut self,
         _id: &str,
         _name: &str,
         _args: &serde_json::Value,
@@ -96,7 +96,7 @@ impl Extension for LabelExt {
         }
     }
 
-    async fn on_message_update(&self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
+    async fn on_message_update(&mut self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
         self.record("on_message_update");
         if self.should_fail {
             return Err(ExtensionError::ExtensionFailed {
@@ -107,7 +107,7 @@ impl Extension for LabelExt {
         Ok(())
     }
 
-    async fn on_message_end(&self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
+    async fn on_message_end(&mut self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
         self.record("on_message_end");
         Ok(())
     }

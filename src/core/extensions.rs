@@ -17,43 +17,39 @@ pub enum ExtensionError {
 }
 
 #[async_trait]
-pub trait Extension: Send + Sync {
+pub trait Extension: Send + 'static {
     fn name(&self) -> &str;
 
-    async fn on_agent_start(&self, _state: AgentState) -> Result<AgentState, ExtensionError> {
+    async fn on_agent_start(&mut self, _state: AgentState) -> Result<AgentState, ExtensionError> {
         Ok(_state)
     }
 
-    #[allow(unused_mut)]
-    async fn on_agent_end(&self, _state: AgentState) -> Result<AgentState, ExtensionError> {
+    async fn on_agent_end(&mut self, _state: AgentState) -> Result<AgentState, ExtensionError> {
         Ok(_state)
     }
 
-    #[allow(unused_mut)]
-    async fn on_turn_start(&self, _state: AgentState) -> Result<AgentState, ExtensionError> {
+    async fn on_turn_start(&mut self, _state: AgentState) -> Result<AgentState, ExtensionError> {
         Ok(_state)
     }
 
-    #[allow(unused_mut)]
-    async fn on_turn_end(&self, _state: AgentState) -> Result<AgentState, ExtensionError> {
+    async fn on_turn_end(&mut self, _state: AgentState) -> Result<AgentState, ExtensionError> {
         Ok(_state)
     }
 
-    #[allow(unused_mut)]
-    async fn on_message_start(&self, _req: Request) -> Result<Request, ExtensionError> {
+    async fn on_message_start(&mut self, _req: Request) -> Result<Request, ExtensionError> {
         Ok(_req)
     }
 
-    async fn on_message_update(&self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
+    async fn on_message_update(&mut self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
         Ok(())
     }
 
-    async fn on_message_end(&self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
+    async fn on_message_end(&mut self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
         Ok(())
     }
 
     async fn on_tool_execution_start(
-        &self,
+        &mut self,
         _tool_call_id: &str,
         _name: &str,
         _args: &serde_json::Value,
@@ -62,7 +58,7 @@ pub trait Extension: Send + Sync {
     }
 
     async fn tool_execution_end(
-        &self,
+        &mut self,
         _tool_call_id: &str,
         _result: Result<String, ToolError>,
     ) -> Result<Result<String, ToolError>, ExtensionError> {
@@ -76,5 +72,11 @@ pub struct NoopExtension;
 impl Extension for NoopExtension {
     fn name(&self) -> &str {
         "noop"
+    }
+}
+
+impl<T: Extension> From<T> for Box<dyn Extension> {
+    fn from(ext: T) -> Self {
+        Box::new(ext)
     }
 }

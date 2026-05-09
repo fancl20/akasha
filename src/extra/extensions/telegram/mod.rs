@@ -1,3 +1,3 @@
 mod telegram;
 
-pub use telegram::{TelegramExtension, run};
+pub use telegram::{TelegramExtension, dispatch};

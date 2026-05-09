@@ -3,53 +3,82 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use teloxide::dispatching::dialogue::{Dialogue, InMemStorage};
-use teloxide::dispatching::{Dispatcher, HandlerExt, UpdateFilterExt, dialogue};
+use teloxide::dispatching::{Dispatcher, UpdateFilterExt, UpdateHandler, dialogue};
 use teloxide::prelude::Requester;
 use teloxide::types::{ChatAction, ChatId, Message as TgMessage, Update};
 use teloxide::utils::command::BotCommands;
 use teloxide::{ApiError, Bot, RequestError, dptree};
 use tokio::sync::{mpsc, oneshot};
+use tokio::task::JoinSet;
 
 use crate::core::agent::{Agent, AgentState};
 use crate::core::extensions::{Extension, ExtensionError};
-use crate::core::providers::{Model, Registry, StreamResponse};
-use crate::core::tools::ToolRegistry;
+use crate::core::providers::StreamResponse;
 use crate::core::types::{ContentBlock, Message};
+use crate::extra::extensions::combinator::And;
 
 enum StreamEvent {
     Append(ContentBlock),
     Finish(oneshot::Sender<Result<(), ExtensionError>>),
 }
 
-/// Extension that streams agent responses into Telegram messages via
-/// edit-as-you-go, splitting at line boundaries when the 4096-char
-/// limit is reached.
-///
-/// Chunk text is sent through an unbounded channel to a background task
-/// so that `on_response_chunk` never blocks on Telegram API calls.
 pub struct TelegramExtension {
     tx: mpsc::UnboundedSender<StreamEvent>,
+    rx: mpsc::UnboundedReceiver<Message>,
 }
 
-impl Clone for TelegramExtension {
-    fn clone(&self) -> Self {
-        Self {
-            tx: self.tx.clone(),
-        }
+#[async_trait]
+impl Extension for TelegramExtension {
+    fn name(&self) -> &str {
+        "telegram"
     }
-}
 
-impl TelegramExtension {
-    pub fn new(bot: Bot, chat_id: ChatId) -> Self {
-        let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(edit_loop(bot, chat_id, rx));
-        Self { tx }
+    async fn on_message_update(&mut self, chunk: &StreamResponse) -> Result<(), ExtensionError> {
+        for block in &chunk.message.content {
+            self.tx
+                .send(StreamEvent::Append(block.clone()))
+                .map_err(|_| ExtensionError::ExtensionFailed {
+                    name: "telegram".to_string(),
+                    message: "updater task dropped".to_string(),
+                })?;
+        }
+
+        Ok(())
+    }
+
+    async fn on_message_end(&mut self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .send(StreamEvent::Finish(tx))
+            .map_err(|_| ExtensionError::ExtensionFailed {
+                name: "telegram".to_string(),
+                message: "updater task dropped".to_string(),
+            })?;
+
+        rx.await.map_err(|_| ExtensionError::ExtensionFailed {
+            name: "telegram".to_string(),
+            message: "updater task dropped".to_string(),
+        })?
+    }
+
+    async fn on_turn_end(&mut self, mut state: AgentState) -> Result<AgentState, ExtensionError> {
+        state.messages.push(
+            self.rx
+                .recv()
+                .await
+                .ok_or(ExtensionError::ExtensionFailed {
+                    name: "telegram".to_string(),
+                    message: "input channel dropped".to_string(),
+                })?,
+        );
+
+        Ok(state)
     }
 }
 
 /// Background task: receives chunks from the channel, batches them,
 /// and flushes to Telegram with throttling.
-async fn edit_loop(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<StreamEvent>) {
+async fn update_chat(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<StreamEvent>) {
     let mut pending = String::new();
     let mut message_id = None;
     let mut wait_until = SystemTime::UNIX_EPOCH;
@@ -128,58 +157,28 @@ async fn edit_loop(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<St
     }
 }
 
-#[async_trait]
-impl Extension for TelegramExtension {
-    fn name(&self) -> &str {
-        "telegram"
-    }
-
-    async fn on_message_update(&self, chunk: &StreamResponse) -> Result<(), ExtensionError> {
-        for block in &chunk.message.content {
-            self.tx
-                .send(StreamEvent::Append(block.clone()))
-                .map_err(|_| ExtensionError::ExtensionFailed {
-                    name: "telegram".to_string(),
-                    message: "editor task dropped".to_string(),
-                })?;
-        }
-
-        Ok(())
-    }
-
-    async fn on_message_end(&self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
-        let (done_tx, done_rx) = oneshot::channel();
-        self.tx.send(StreamEvent::Finish(done_tx)).map_err(|_| {
-            ExtensionError::ExtensionFailed {
-                name: "telegram".to_string(),
-                message: "editor task dropped".to_string(),
-            }
-        })?;
-        done_rx.await.map_err(|_| ExtensionError::ExtensionFailed {
-            name: "telegram".to_string(),
-            message: "editor task crashed".to_string(),
-        })?
-    }
-}
-
 #[derive(Clone, Default)]
-struct ChatState {
-    messages: Vec<Message>,
-    extension: Option<TelegramExtension>,
+enum State {
+    #[default]
+    Idle,
+    Running {
+        #[allow(unused)]
+        tasks: Arc<JoinSet<()>>,
+        tx: mpsc::UnboundedSender<Message>,
+    },
 }
 
-type AgentDialogue = Dialogue<ChatState, InMemStorage<ChatState>>;
+type AgentDialogue = Dialogue<State, InMemStorage<State>>;
+type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Bot commands")]
 enum Command {
-    #[command(description = "clear conversation history")]
-    Clear,
+    #[command(description = "reset agent status")]
+    Reset,
     #[command(description = "show available commands")]
     Help,
 }
-
-type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 
 async fn command_handler(
     bot: Bot,
@@ -188,10 +187,9 @@ async fn command_handler(
     cmd: Command,
 ) -> HandlerResult {
     match cmd {
-        Command::Clear => {
+        Command::Reset => {
             dialogue.exit().await?;
-            bot.send_message(msg.chat.id, "Conversation history cleared.")
-                .await?;
+            bot.send_message(msg.chat.id, "Agent reseted.").await?;
         }
         Command::Help => {
             bot.send_message(msg.chat.id, Command::descriptions().to_string())
@@ -205,90 +203,85 @@ async fn handle_message(
     bot: Bot,
     dialogue: AgentDialogue,
     msg: TgMessage,
-    model: Arc<Model>,
-    models: Arc<Registry>,
-    tools: Arc<ToolRegistry>,
+    agent_factory: Arc<dyn Fn() -> Agent + Send + Sync + 'static>,
 ) -> HandlerResult {
-    let chat_id = msg.chat.id;
-
-    let text = match msg.text() {
-        Some(t) => t,
-        None => return Ok(()),
-    };
-
-    let mut state = dialogue.get_or_default().await?;
-
-    let ext = state
-        .extension
-        .get_or_insert_with(|| TelegramExtension::new(bot.clone(), chat_id))
-        .clone();
-
-    let mut agent = Agent {
-        state: AgentState {
-            model: (*model).clone(),
-            tools: (*tools).clone(),
-            messages: state.messages.clone(),
-        },
-        models: Arc::clone(&models),
-        extension: Box::new(ext),
-    };
-
-    let user_msg = Message {
-        role: "user".into(),
-        content: vec![ContentBlock::Text {
-            content: text.to_owned(),
-        }],
-    };
-
-    match agent.prompt(user_msg).await {
-        Ok(()) => {
-            state.messages = agent.state.messages;
-            dialogue.update(state).await?;
+    let prompt = if let Some(text) = msg.text() {
+        Message {
+            role: "user".into(),
+            content: vec![ContentBlock::Text {
+                content: text.to_owned(),
+            }],
         }
-        Err(e) => {
-            let _ = bot.send_message(chat_id, format!("agent error: {e}")).await;
+    } else {
+        return Ok(());
+    };
+
+    match dialogue.get_or_default().await? {
+        State::Idle => {
+            let (event_tx, event_rx) = mpsc::unbounded_channel();
+            let (msg_tx, msg_rx) = mpsc::unbounded_channel();
+
+            let mut agent = agent_factory();
+            agent.extension = And::new(
+                agent.extension,
+                TelegramExtension {
+                    tx: event_tx,
+                    rx: msg_rx,
+                },
+            )
+            .into();
+
+            let mut tasks = JoinSet::new();
+            tasks.spawn(async move {
+                if let Err(e) = agent.prompt(prompt).await {
+                    eprintln!("agent prompt error: {}", e);
+                }
+            });
+            tasks.spawn(update_chat(bot, msg.chat.id, event_rx));
+
+            dialogue
+                .update(State::Running {
+                    tasks: Arc::new(tasks),
+                    tx: msg_tx,
+                })
+                .await?;
+        }
+        State::Running { tasks: _, tx } => {
+            tx.send(prompt)?;
         }
     }
 
     Ok(())
 }
 
-pub async fn run(
+fn schema(
+    ids: Arc<HashSet<u64>>,
+) -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'static>> {
+    let allowed_filter = move |msg: TgMessage| {
+        msg.from
+            .map(|user| ids.contains(&user.id.0))
+            .unwrap_or_default()
+    };
+
+    let command_handler = teloxide::filter_command::<Command, _>()
+        .branch(dptree::case![Command::Help].endpoint(command_handler))
+        .branch(dptree::case![Command::Reset].endpoint(command_handler));
+
+    let message_handler = Update::filter_message()
+        .filter(allowed_filter)
+        .branch(command_handler)
+        .branch(dptree::entry().endpoint(handle_message));
+
+    dialogue::enter::<Update, InMemStorage<State>, State, _>().branch(message_handler)
+}
+
+pub async fn dispatch(
     token: impl Into<String>,
-    model: Model,
-    models: Registry,
-    tools: ToolRegistry,
     allowed_ids: HashSet<u64>,
+    agent_factory: Arc<dyn Fn() -> Agent + Send + Sync + 'static>,
 ) {
-    let bot = Bot::new(token.into());
-    let model = Arc::new(model);
-    let models = Arc::new(models);
-    let tools = Arc::new(tools);
-    let allowed_ids = Arc::new(allowed_ids);
-
-    let handler = dialogue::enter::<Update, InMemStorage<ChatState>, ChatState, _>().branch(
-        Update::filter_message()
-            .filter(|msg: TgMessage, allowed_ids: Arc<HashSet<u64>>| {
-                msg.from
-                    .map(|user| allowed_ids.contains(&user.id.0))
-                    .unwrap_or_default()
-            })
-            .branch(
-                dptree::entry()
-                    .filter_command::<Command>()
-                    .endpoint(command_handler),
-            )
-            .branch(dptree::entry().endpoint(handle_message)),
-    );
-
-    Dispatcher::builder(bot, handler)
-        .dependencies(dptree::deps![
-            InMemStorage::<ChatState>::new(),
-            model,
-            models,
-            tools,
-            allowed_ids
-        ])
+    Dispatcher::builder(Bot::new(token.into()), schema(Arc::new(allowed_ids)))
+        .dependencies(dptree::deps![InMemStorage::<State>::new(), agent_factory])
         .build()
         .dispatch()
         .await;

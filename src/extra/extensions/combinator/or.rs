@@ -10,77 +10,89 @@ use crate::core::types::Request;
 /// For state-transforming hooks, A is tried on the original state and,
 /// on error, B is retried on the same original state.
 /// For tool decisions, if A denies, B gets a chance to override.
-pub struct Or<A: Extension, B: Extension>(pub A, pub B);
+pub struct Or {
+    a: Box<dyn Extension>,
+    b: Box<dyn Extension>,
+}
+
+impl Or {
+    pub fn new<A: Into<Box<dyn Extension>>, B: Into<Box<dyn Extension>>>(a: A, b: B) -> Self {
+        Self {
+            a: a.into(),
+            b: b.into(),
+        }
+    }
+}
 
 #[async_trait]
-impl<A: Extension, B: Extension> Extension for Or<A, B> {
+impl Extension for Or {
     fn name(&self) -> &str {
         "or"
     }
 
-    async fn on_agent_start(&self, state: AgentState) -> Result<AgentState, ExtensionError> {
-        match self.0.on_agent_start(state.clone()).await {
+    async fn on_agent_start(&mut self, state: AgentState) -> Result<AgentState, ExtensionError> {
+        match self.a.on_agent_start(state.clone()).await {
             Ok(s) => Ok(s),
-            Err(_) => self.1.on_agent_start(state).await,
+            Err(_) => self.b.on_agent_start(state).await,
         }
     }
 
-    async fn on_agent_end(&self, state: AgentState) -> Result<AgentState, ExtensionError> {
-        match self.0.on_agent_end(state.clone()).await {
+    async fn on_agent_end(&mut self, state: AgentState) -> Result<AgentState, ExtensionError> {
+        match self.a.on_agent_end(state.clone()).await {
             Ok(s) => Ok(s),
-            Err(_) => self.1.on_agent_end(state).await,
+            Err(_) => self.b.on_agent_end(state).await,
         }
     }
 
-    async fn on_turn_start(&self, state: AgentState) -> Result<AgentState, ExtensionError> {
-        match self.0.on_turn_start(state.clone()).await {
+    async fn on_turn_start(&mut self, state: AgentState) -> Result<AgentState, ExtensionError> {
+        match self.a.on_turn_start(state.clone()).await {
             Ok(s) => Ok(s),
-            Err(_) => self.1.on_turn_start(state).await,
+            Err(_) => self.b.on_turn_start(state).await,
         }
     }
 
-    async fn on_turn_end(&self, state: AgentState) -> Result<AgentState, ExtensionError> {
-        match self.0.on_turn_end(state.clone()).await {
+    async fn on_turn_end(&mut self, state: AgentState) -> Result<AgentState, ExtensionError> {
+        match self.a.on_turn_end(state.clone()).await {
             Ok(s) => Ok(s),
-            Err(_) => self.1.on_turn_end(state).await,
+            Err(_) => self.b.on_turn_end(state).await,
         }
     }
 
-    async fn on_message_start(&self, req: Request) -> Result<Request, ExtensionError> {
-        match self.0.on_message_start(req.clone()).await {
+    async fn on_message_start(&mut self, req: Request) -> Result<Request, ExtensionError> {
+        match self.a.on_message_start(req.clone()).await {
             Ok(r) => Ok(r),
-            Err(_) => self.1.on_message_start(req).await,
+            Err(_) => self.b.on_message_start(req).await,
         }
     }
 
-    async fn on_message_update(&self, resp: &StreamResponse) -> Result<(), ExtensionError> {
-        match self.0.on_message_update(resp).await {
+    async fn on_message_update(&mut self, resp: &StreamResponse) -> Result<(), ExtensionError> {
+        match self.a.on_message_update(resp).await {
             Ok(()) => Ok(()),
-            Err(_) => self.1.on_message_update(resp).await,
+            Err(_) => self.b.on_message_update(resp).await,
         }
     }
 
-    async fn on_message_end(&self, resp: &StreamResponse) -> Result<(), ExtensionError> {
-        match self.0.on_message_end(resp).await {
+    async fn on_message_end(&mut self, resp: &StreamResponse) -> Result<(), ExtensionError> {
+        match self.a.on_message_end(resp).await {
             Ok(()) => Ok(()),
-            Err(_) => self.1.on_message_end(resp).await,
+            Err(_) => self.b.on_message_end(resp).await,
         }
     }
 
     async fn on_tool_execution_start(
-        &self,
+        &mut self,
         tool_call_id: &str,
         name: &str,
         args: &serde_json::Value,
     ) -> Result<ToolCallDecision, ExtensionError> {
         match self
-            .0
+            .a
             .on_tool_execution_start(tool_call_id, name, args)
             .await?
         {
             ToolCallDecision::Allow => Ok(ToolCallDecision::Allow),
             ToolCallDecision::Deny(_) => {
-                self.1
+                self.b
                     .on_tool_execution_start(tool_call_id, name, args)
                     .await
             }
@@ -88,17 +100,17 @@ impl<A: Extension, B: Extension> Extension for Or<A, B> {
     }
 
     async fn tool_execution_end(
-        &self,
+        &mut self,
         tool_call_id: &str,
         result: Result<String, ToolError>,
     ) -> Result<Result<String, ToolError>, ExtensionError> {
         match self
-            .0
+            .a
             .tool_execution_end(tool_call_id, result.clone())
             .await
         {
             Ok(r) => Ok(r),
-            Err(_) => self.1.tool_execution_end(tool_call_id, result).await,
+            Err(_) => self.b.tool_execution_end(tool_call_id, result).await,
         }
     }
 }
@@ -113,13 +125,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_or_name() {
-        let ext = Or(NoopExtension, NoopExtension);
+        let ext = Or::new(NoopExtension, NoopExtension);
         assert_eq!(ext.name(), "or");
     }
 
     #[tokio::test]
     async fn test_or_first_succeeds() {
-        let ext = Or(LabelExt::ok("a"), LabelExt::ok("b"));
+        let mut ext = Or::new(LabelExt::ok("a"), LabelExt::ok("b"));
         let req = make_request("");
         let result = ext.on_message_start(req).await.unwrap();
         let text = match result.messages[0].content.last() {
@@ -131,7 +143,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_or_fallback_on_failure() {
-        let ext = Or(LabelExt::fail("a"), LabelExt::ok("b"));
+        let mut ext = Or::new(LabelExt::fail("a"), LabelExt::ok("b"));
         let req = make_request("");
         let result = ext.on_message_start(req).await.unwrap();
         let text = match result.messages[0].content.last() {
@@ -143,7 +155,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_or_both_fail() {
-        let ext = Or(LabelExt::fail("a"), LabelExt::fail("b"));
+        let mut ext = Or::new(LabelExt::fail("a"), LabelExt::fail("b"));
         let req = make_request("hello");
         let err = ext.on_message_start(req).await.unwrap_err();
         match err {
@@ -153,7 +165,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_or_tool_execution_first_allows() {
-        let ext = Or(LabelExt::ok("a"), LabelExt::ok("b"));
+        let mut ext = Or::new(LabelExt::ok("a"), LabelExt::ok("b"));
         let decision = ext
             .on_tool_execution_start("", "tool", &serde_json::Value::Null)
             .await
@@ -163,7 +175,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_or_tool_execution_first_denies_second_overrides() {
-        let ext = Or(LabelExt::deny("a", "nope"), LabelExt::ok("b"));
+        let mut ext = Or::new(LabelExt::deny("a", "nope"), LabelExt::ok("b"));
         let decision = ext
             .on_tool_execution_start("", "tool", &serde_json::Value::Null)
             .await
@@ -173,7 +185,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_or_tool_execution_both_deny() {
-        let ext = Or(
+        let mut ext = Or::new(
             LabelExt::deny("a", "nope"),
             LabelExt::deny("b", "also nope"),
         );
@@ -189,7 +201,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_or_on_message_update_fallback() {
-        let ext = Or(LabelExt::fail("a"), LabelExt::ok("b"));
+        let mut ext = Or::new(LabelExt::fail("a"), LabelExt::ok("b"));
         let resp = make_response();
         ext.on_message_update(&resp).await.unwrap();
     }

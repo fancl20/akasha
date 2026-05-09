@@ -258,8 +258,6 @@ async fn process_sse(
 ) {
     let mut buffer = String::new();
     let mut partial_tools: HashMap<usize, PartialToolCall> = HashMap::new();
-    let mut final_tool_calls: Vec<ContentBlock> = Vec::new();
-    let mut accumulated_text = String::new();
     let mut last_usage: Option<TokenUsage> = None;
 
     while let Some(chunk) = byte_stream.next().await {
@@ -282,7 +280,7 @@ async fn process_sse(
             };
 
             if data == "[DONE]" {
-                emit_done(&mut tx, &accumulated_text, &last_usage).await;
+                emit_done(&mut tx, &last_usage).await;
                 return;
             }
 
@@ -303,7 +301,6 @@ async fn process_sse(
             for choice in chunk.choices {
                 if let Some(content) = choice.delta.content {
                     if !content.is_empty() {
-                        accumulated_text.push_str(&content);
                         let _ = tx
                             .send(StreamResponse {
                                 message: Message {
@@ -379,7 +376,7 @@ async fn process_sse(
                                 .send(StreamResponse {
                                     message: Message {
                                         role: "assistant".to_string(),
-                                        content: vec![tc.clone()],
+                                        content: vec![tc],
                                     },
                                     usage: TokenUsage {
                                         input_tokens: 0,
@@ -390,7 +387,6 @@ async fn process_sse(
                                     stop_reason: Some("tool_calls".to_string()),
                                 })
                                 .await;
-                            final_tool_calls.push(tc);
                         }
                     }
                 }
@@ -398,26 +394,13 @@ async fn process_sse(
         }
     }
 
-    emit_done(&mut tx, &accumulated_text, &last_usage).await;
+    emit_done(&mut tx, &last_usage).await;
 }
 
 async fn emit_done(
     tx: &mut futures::channel::mpsc::Sender<StreamResponse>,
-    text: &str,
     usage: &Option<TokenUsage>,
 ) {
-    let mut content: Vec<ContentBlock> = Vec::new();
-    if !text.is_empty() {
-        content.push(ContentBlock::Text {
-            content: text.to_owned(),
-        });
-    }
-
-    let message = Message {
-        role: "assistant".to_string(),
-        content,
-    };
-
     let usage = usage.clone().unwrap_or(TokenUsage {
         input_tokens: 0,
         output_tokens: 0,
@@ -427,7 +410,10 @@ async fn emit_done(
 
     let _ = tx
         .send(StreamResponse {
-            message,
+            message: Message {
+                role: "assistant".to_string(),
+                content: vec![],
+            },
             usage,
             stop_reason: Some("stop".to_string()),
         })
