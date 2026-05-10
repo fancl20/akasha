@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use crate::core::agent::AgentState;
 use crate::core::providers::StreamResponse;
 use crate::core::tools::ToolError;
-use crate::core::types::Request;
+use crate::core::types::{Request, ToolResult};
 
 pub enum ToolCallDecision {
     Allow,
@@ -60,8 +60,8 @@ pub trait Extension: Send + 'static {
     async fn tool_execution_end(
         &mut self,
         _tool_call_id: &str,
-        _result: Result<String, ToolError>,
-    ) -> Result<Result<String, ToolError>, ExtensionError> {
+        _result: Result<ToolResult, ToolError>,
+    ) -> Result<Result<ToolResult, ToolError>, ExtensionError> {
         Ok(_result)
     }
 }

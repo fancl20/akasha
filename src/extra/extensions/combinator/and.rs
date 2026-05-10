@@ -4,7 +4,7 @@ use crate::core::agent::AgentState;
 use crate::core::extensions::{Extension, ExtensionError, ToolCallDecision};
 use crate::core::providers::StreamResponse;
 use crate::core::tools::ToolError;
-use crate::core::types::Request;
+use crate::core::types::{Request, ToolResult};
 
 /// Runs both extensions sequentially. Both must succeed.
 /// For state-transforming hooks, output of A feeds into B.
@@ -87,8 +87,8 @@ impl Extension for And {
     async fn tool_execution_end(
         &mut self,
         tool_call_id: &str,
-        result: Result<String, ToolError>,
-    ) -> Result<Result<String, ToolError>, ExtensionError> {
+        result: Result<ToolResult, ToolError>,
+    ) -> Result<Result<ToolResult, ToolError>, ExtensionError> {
         let result = self.a.tool_execution_end(tool_call_id, result).await?;
         self.b.tool_execution_end(tool_call_id, result).await
     }
@@ -114,7 +114,7 @@ mod tests {
         let req = make_request("");
         let result = ext.on_message_start(req).await.unwrap();
         let text = match result.messages[0].content.last() {
-            Some(ContentBlock::Text { content }) => content.clone(),
+            Some(ContentBlock::Text(t)) => t.content.clone(),
             _ => panic!("expected text"),
         };
         assert_eq!(text, "a,b");
@@ -170,9 +170,9 @@ mod tests {
         let result = ext.on_message_start(req).await.unwrap();
         assert_eq!(
             result.messages[0].content,
-            vec![ContentBlock::Text {
+            vec![ContentBlock::Text(crate::core::types::TextContent {
                 content: "hello".into()
-            }]
+            })]
         );
     }
 }

@@ -1,22 +1,43 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TextContent {
+    pub content: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImageContetnt {
+    pub data: Vec<u8>,
+    pub mime: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ToolResultContent {
+    Text(TextContent),
+    Image(ImageContetnt),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolResult {
+    pub tool_call_id: String,
+    pub content: Vec<ToolResultContent>,
+    pub is_error: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ContentBlock {
-    Text {
-        content: String,
-    },
-    Reasoning {
-        content: String,
-    },
-    ToolCall {
-        id: String,
-        name: String,
-        arguments: serde_json::Value,
-    },
-    ToolResult {
-        tool_call_id: String,
-        content: String,
-    },
+    Text(TextContent),
+    Image(ImageContetnt),
+    Reasoning(TextContent),
+    ToolCall(ToolCall),
+    ToolResult(ToolResult),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

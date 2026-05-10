@@ -61,24 +61,19 @@ impl StreamResponse {
     pub fn merge(&mut self, chunk: StreamResponse) {
         for block in chunk.message.content {
             match block {
-                ContentBlock::Text { content } => {
-                    if let Some(ContentBlock::Text { content: existing }) =
-                        self.message.content.last_mut()
-                    {
-                        existing.push_str(&content);
+                ContentBlock::Text(t) => {
+                    if let Some(ContentBlock::Text(existing)) = self.message.content.last_mut() {
+                        existing.content.push_str(&t.content);
                     } else {
-                        self.message.content.push(ContentBlock::Text { content });
+                        self.message.content.push(ContentBlock::Text(t));
                     }
                 }
-                ContentBlock::Reasoning { content } => {
-                    if let Some(ContentBlock::Reasoning { content: existing }) =
-                        self.message.content.last_mut()
+                ContentBlock::Reasoning(t) => {
+                    if let Some(ContentBlock::Reasoning(existing)) = self.message.content.last_mut()
                     {
-                        existing.push_str(&content);
+                        existing.content.push_str(&t.content);
                     } else {
-                        self.message
-                            .content
-                            .push(ContentBlock::Reasoning { content });
+                        self.message.content.push(ContentBlock::Reasoning(t));
                     }
                 }
                 other => self.message.content.push(other),

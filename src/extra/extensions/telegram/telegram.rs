@@ -14,7 +14,7 @@ use tokio::task::JoinSet;
 use crate::core::agent::{Agent, AgentState};
 use crate::core::extensions::{Extension, ExtensionError};
 use crate::core::providers::StreamResponse;
-use crate::core::types::{ContentBlock, Message};
+use crate::core::types::{ContentBlock, Message, TextContent};
 use crate::extra::extensions::combinator::And;
 
 enum StreamEvent {
@@ -92,7 +92,7 @@ async fn update_chat(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<
 
         let mut finish_tx = None;
         match event {
-            Some(StreamEvent::Append(ContentBlock::Text { content })) => pending.push_str(&content),
+            Some(StreamEvent::Append(ContentBlock::Text(t))) => pending.push_str(&t.content),
             Some(StreamEvent::Append(ContentBlock::Reasoning { .. })) => (), // Allow reasoning event to trigger typing action.
             Some(StreamEvent::Append(..)) => continue,
             Some(StreamEvent::Finish(done)) => {
@@ -208,9 +208,9 @@ async fn handle_message(
     let prompt = if let Some(text) = msg.text() {
         Message {
             role: "user".into(),
-            content: vec![ContentBlock::Text {
+            content: vec![ContentBlock::Text(TextContent {
                 content: text.to_owned(),
-            }],
+            })],
         }
     } else {
         return Ok(());

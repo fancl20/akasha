@@ -4,7 +4,7 @@ use crate::core::agent::AgentState;
 use crate::core::extensions::{Extension, ExtensionError, ToolCallDecision};
 use crate::core::providers::StreamResponse;
 use crate::core::tools::ToolError;
-use crate::core::types::Request;
+use crate::core::types::{Request, ToolResult};
 
 /// Tries extension A first; if A fails, falls back to B.
 /// For state-transforming hooks, A is tried on the original state and,
@@ -102,8 +102,8 @@ impl Extension for Or {
     async fn tool_execution_end(
         &mut self,
         tool_call_id: &str,
-        result: Result<String, ToolError>,
-    ) -> Result<Result<String, ToolError>, ExtensionError> {
+        result: Result<ToolResult, ToolError>,
+    ) -> Result<Result<ToolResult, ToolError>, ExtensionError> {
         match self
             .a
             .tool_execution_end(tool_call_id, result.clone())
@@ -135,7 +135,7 @@ mod tests {
         let req = make_request("");
         let result = ext.on_message_start(req).await.unwrap();
         let text = match result.messages[0].content.last() {
-            Some(ContentBlock::Text { content }) => content.clone(),
+            Some(ContentBlock::Text(t)) => t.content.clone(),
             _ => panic!("expected text"),
         };
         assert_eq!(text, "a");
@@ -147,7 +147,7 @@ mod tests {
         let req = make_request("");
         let result = ext.on_message_start(req).await.unwrap();
         let text = match result.messages[0].content.last() {
-            Some(ContentBlock::Text { content }) => content.clone(),
+            Some(ContentBlock::Text(t)) => t.content.clone(),
             _ => panic!("expected text"),
         };
         assert_eq!(text, "b");

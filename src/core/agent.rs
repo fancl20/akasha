@@ -5,7 +5,9 @@ use std::sync::Arc;
 
 use crate::core::providers::{Model, Registry, StreamResponse};
 use crate::core::tools::ToolRegistry;
-use crate::core::types::{ContentBlock, Message, Request};
+use crate::core::types::{
+    ContentBlock, Message, Request, TextContent, ToolResult, ToolResultContent,
+};
 
 /// Errors from agent operations.
 #[derive(Debug, thiserror::Error)]
@@ -100,11 +102,9 @@ pub async fn agent_loop(
             .content
             .iter()
             .filter_map(|b| match b {
-                ContentBlock::ToolCall {
-                    id,
-                    name,
-                    arguments,
-                } => Some((id.clone(), name.clone(), arguments.clone())),
+                ContentBlock::ToolCall(tc) => {
+                    Some((tc.id.clone(), tc.name.clone(), tc.arguments.clone()))
+                }
                 _ => None,
             })
             .collect();
@@ -120,10 +120,11 @@ pub async fn agent_loop(
             if let ToolCallDecision::Deny(reason) = decision {
                 request.messages.push(Message {
                     role: "tool".to_string(),
-                    content: vec![ContentBlock::ToolResult {
+                    content: vec![ContentBlock::ToolResult(ToolResult {
                         tool_call_id: id,
-                        content: reason,
-                    }],
+                        content: vec![ToolResultContent::Text(TextContent { content: reason })],
+                        is_error: true,
+                    })],
                 });
                 continue;
             }
@@ -135,17 +136,16 @@ pub async fn agent_loop(
             let cancel = tokio::sync::watch::channel(false).1;
             let raw_result = handler.execute(cancel, arguments).await;
 
-            let result = extension
+            let mut result = extension
                 .tool_execution_end(&id, raw_result)
                 .await?
                 .map_err(|e| AgentError::Tool(format!("tool '{name}' execution failed: {e}")))?;
 
+            result.tool_call_id = id;
+
             request.messages.push(Message {
                 role: "tool".to_string(),
-                content: vec![ContentBlock::ToolResult {
-                    tool_call_id: id,
-                    content: result,
-                }],
+                content: vec![ContentBlock::ToolResult(result)],
             });
         }
     }

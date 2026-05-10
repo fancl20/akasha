@@ -5,7 +5,7 @@ use akasha::core::agent::{Agent, AgentState};
 use akasha::core::extensions::NoopExtension;
 use akasha::core::providers::{Model, Registry};
 use akasha::core::tools::ToolRegistry;
-use akasha::core::types::{ContentBlock, Message};
+use akasha::core::types::{ContentBlock, Message, TextContent};
 use akasha::extra::extensions::telegram;
 use akasha::extra::providers::deepseek::DeepSeekProvider;
 use clap::Parser;
@@ -66,9 +66,9 @@ async fn main() {
 
     let prompt = Message {
         role: "user".into(),
-        content: vec![ContentBlock::Text {
+        content: vec![ContentBlock::Text(TextContent {
             content: "use tools to assist user and respond concisely for readability on phone. keep the tone dry and neutral.".into(),
-        }],
+        })],
     };
 
     telegram::dispatch(

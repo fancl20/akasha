@@ -8,7 +8,7 @@ use rmcp::transport::StreamableHttpClientTransport;
 use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
 
 use crate::core::tools::{ToolError, ToolHandler, ToolRegistry};
-use crate::core::types::ToolDefinition;
+use crate::core::types::{TextContent, ToolDefinition, ToolResult, ToolResultContent};
 
 /// Error type for MCP connection and tool discovery.
 #[derive(Debug, thiserror::Error)]
@@ -41,7 +41,7 @@ impl ToolHandler for McpTool {
         &self,
         _cancel: tokio::sync::watch::Receiver<bool>,
         params: serde_json::Value,
-    ) -> Result<String, ToolError> {
+    ) -> Result<ToolResult, ToolError> {
         let arguments = params.as_object().cloned();
 
         let mut req = CallToolRequestParams::new(self.definition.name.clone());
@@ -55,39 +55,61 @@ impl ToolHandler for McpTool {
             .await
             .map_err(|e| ToolError::Execution(e.to_string()))?;
 
-        let text = format_content(&result);
+        let content = to_result_content(&result);
 
         if result.is_error.unwrap_or(false) {
+            let text = text_from_content(&content);
             Err(ToolError::Execution(text))
         } else {
-            Ok(text)
+            Ok(ToolResult {
+                tool_call_id: String::new(),
+                content,
+                is_error: false,
+            })
         }
     }
 }
 
-/// Extracts readable text from a [`CallToolResult`].
-///
-/// Joins all text and text-resource content items with newlines. Falls back to
-/// JSON-serialising the full content list when no textual items are present
-/// (e.g. image-only results).
-fn format_content(result: &CallToolResult) -> String {
-    let texts: Vec<String> = result
-        .content
-        .iter()
-        .filter_map(|c| match &c.raw {
-            RawContent::Text(t) => Some(t.text.clone()),
+impl From<&RawContent> for ToolResultContent {
+    fn from(raw: &RawContent) -> Self {
+        match raw {
+            RawContent::Text(t) => ToolResultContent::Text(TextContent {
+                content: t.text.clone(),
+            }),
             RawContent::Resource(r) => match &r.resource {
                 rmcp::model::ResourceContents::TextResourceContents { text, .. } => {
-                    Some(text.clone())
+                    ToolResultContent::Text(TextContent {
+                        content: text.clone(),
+                    })
                 }
-                _ => None,
+                _ => ToolResultContent::Text(TextContent {
+                    content: format!("{raw:?}"),
+                }),
             },
+            _ => ToolResultContent::Text(TextContent {
+                content: format!("{raw:?}"),
+            }),
+        }
+    }
+}
+
+/// Converts MCP tool result content into [`ToolResultContent`].
+fn to_result_content(result: &CallToolResult) -> Vec<ToolResultContent> {
+    result.content.iter().map(|c| (&c.raw).into()).collect()
+}
+
+/// Extracts readable text from [`ToolResultContent`] for error messages.
+fn text_from_content(content: &[ToolResultContent]) -> String {
+    let texts: Vec<&str> = content
+        .iter()
+        .filter_map(|c| match c {
+            ToolResultContent::Text(t) => Some(t.content.as_str()),
             _ => None,
         })
         .collect();
 
     if texts.is_empty() {
-        serde_json::to_string(&result.content).unwrap_or_default()
+        serde_json::to_string(content).unwrap_or_default()
     } else {
         texts.join("\n")
     }

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use crate::core::agent::AgentState;
 use crate::core::extensions::{Extension, ExtensionError, ToolCallDecision};
 use crate::core::providers::StreamResponse;
-use crate::core::types::{ContentBlock, Message, Request};
+use crate::core::types::{ContentBlock, Message, Request, TextContent};
 use std::sync::{Arc, Mutex};
 
 pub struct LabelExt {
@@ -60,13 +60,13 @@ impl Extension for LabelExt {
                 message: "fail".into(),
             });
         }
-        if let Some(ContentBlock::Text { content }) =
+        if let Some(ContentBlock::Text(t)) =
             req.messages.last_mut().and_then(|m| m.content.last_mut())
         {
-            if !content.is_empty() {
-                content.push(',');
+            if !t.content.is_empty() {
+                t.content.push(',');
             }
-            content.push_str(self.label);
+            t.content.push_str(self.label);
         }
         Ok(req)
     }
@@ -117,9 +117,9 @@ pub fn make_request(text: &str) -> Request {
     Request {
         messages: vec![Message {
             role: "user".into(),
-            content: vec![ContentBlock::Text {
+            content: vec![ContentBlock::Text(TextContent {
                 content: text.into(),
-            }],
+            })],
         }],
         tools: vec![],
     }

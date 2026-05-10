@@ -9,7 +9,9 @@ use std::pin::Pin;
 use crate::core::providers::{
     Model, Provider, ProviderError, StreamResponse, StreamResponseStream,
 };
-use crate::core::types::{ContentBlock, Message, Request, TokenUsage};
+use crate::core::types::{
+    ContentBlock, Message, Request, TextContent, TokenUsage, ToolCall, ToolResultContent,
+};
 
 const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 
@@ -154,16 +156,12 @@ fn build_messages(context: &Request) -> Vec<ApiMessage> {
                     .content
                     .iter()
                     .filter_map(|b| match b {
-                        ContentBlock::ToolCall {
-                            id,
-                            name,
-                            arguments,
-                        } => Some(ApiToolCall {
-                            id: id.clone(),
+                        ContentBlock::ToolCall(tc) => Some(ApiToolCall {
+                            id: tc.id.clone(),
                             r#type: "function".to_string(),
                             function: ApiFunctionCall {
-                                name: name.clone(),
-                                arguments: arguments.to_string(),
+                                name: tc.name.clone(),
+                                arguments: tc.arguments.to_string(),
                             },
                         }),
                         _ => None,
@@ -185,14 +183,18 @@ fn build_messages(context: &Request) -> Vec<ApiMessage> {
             }
             "tool" => {
                 for block in &msg.content {
-                    if let ContentBlock::ToolResult {
-                        tool_call_id,
-                        content,
-                    } = block
-                    {
+                    if let ContentBlock::ToolResult(result) = block {
+                        let text: String = result
+                            .content
+                            .iter()
+                            .filter_map(|c| match c {
+                                ToolResultContent::Text(t) => Some(t.content.as_str()),
+                                _ => None,
+                            })
+                            .collect();
                         messages.push(ApiMessage::Tool {
-                            content: content.clone(),
-                            tool_call_id: tool_call_id.clone(),
+                            content: text,
+                            tool_call_id: result.tool_call_id.clone(),
                         });
                     }
                 }
@@ -228,7 +230,7 @@ fn extract_text(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
         .filter_map(|b| match b {
-            ContentBlock::Text { content } => Some(content.as_str()),
+            ContentBlock::Text(t) => Some(t.content.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -239,7 +241,7 @@ fn extract_reasoning(blocks: &[ContentBlock]) -> String {
     blocks
         .iter()
         .filter_map(|b| match b {
-            ContentBlock::Reasoning { content } => Some(content.as_str()),
+            ContentBlock::Reasoning(t) => Some(t.content.as_str()),
             _ => None,
         })
         .collect::<Vec<_>>()
@@ -305,7 +307,7 @@ async fn process_sse(
                             .send(StreamResponse {
                                 message: Message {
                                     role: "assistant".to_string(),
-                                    content: vec![ContentBlock::Text { content }],
+                                    content: vec![ContentBlock::Text(TextContent { content })],
                                 },
                                 usage: TokenUsage {
                                     input_tokens: 0,
@@ -325,7 +327,9 @@ async fn process_sse(
                             .send(StreamResponse {
                                 message: Message {
                                     role: "assistant".to_string(),
-                                    content: vec![ContentBlock::Reasoning { content: reasoning }],
+                                    content: vec![ContentBlock::Reasoning(TextContent {
+                                        content: reasoning,
+                                    })],
                                 },
                                 usage: TokenUsage {
                                     input_tokens: 0,
@@ -367,11 +371,11 @@ async fn process_sse(
                         if let Some(ptc) = partial_tools.remove(&idx) {
                             let args = serde_json::from_str(&ptc.arguments)
                                 .unwrap_or(serde_json::Value::Null);
-                            let tc = ContentBlock::ToolCall {
+                            let tc = ContentBlock::ToolCall(ToolCall {
                                 id: ptc.id,
                                 name: ptc.name,
                                 arguments: args,
-                            };
+                            });
                             let _ = tx
                                 .send(StreamResponse {
                                     message: Message {
@@ -499,7 +503,9 @@ mod tests {
     use crate::core::extensions::{Extension, NoopExtension};
     use crate::core::providers::{Model, Provider, Registry};
     use crate::core::tools::{ToolHandler, ToolRegistry};
-    use crate::core::types::{ContentBlock, Message, Request, ToolDefinition};
+    use crate::core::types::{
+        ContentBlock, Message, Request, TextContent, ToolDefinition, ToolResult, ToolResultContent,
+    };
     use futures::StreamExt;
 
     fn api_key() -> Option<String> {
@@ -520,9 +526,9 @@ mod tests {
         Request {
             messages: vec![Message {
                 role: "user".to_string(),
-                content: vec![ContentBlock::Text {
+                content: vec![ContentBlock::Text(TextContent {
                     content: prompt.to_string(),
-                }],
+                })],
             }],
             tools: vec![],
         }
@@ -540,15 +546,15 @@ mod tests {
             messages: vec![
                 Message {
                     role: "system".to_string(),
-                    content: vec![ContentBlock::Text {
+                    content: vec![ContentBlock::Text(TextContent {
                         content: "You are helpful.".to_string(),
-                    }],
+                    })],
                 },
                 Message {
                     role: "user".to_string(),
-                    content: vec![ContentBlock::Text {
+                    content: vec![ContentBlock::Text(TextContent {
                         content: "Hello".to_string(),
-                    }],
+                    })],
                 },
             ],
             tools: vec![],
@@ -563,24 +569,27 @@ mod tests {
             messages: vec![
                 Message {
                     role: "user".to_string(),
-                    content: vec![ContentBlock::Text {
+                    content: vec![ContentBlock::Text(TextContent {
                         content: "What's the weather?".to_string(),
-                    }],
+                    })],
                 },
                 Message {
                     role: "assistant".to_string(),
-                    content: vec![ContentBlock::ToolCall {
+                    content: vec![ContentBlock::ToolCall(ToolCall {
                         id: "call_1".to_string(),
                         name: "get_weather".to_string(),
                         arguments: serde_json::json!({"city": "Tokyo"}),
-                    }],
+                    })],
                 },
                 Message {
                     role: "tool".to_string(),
-                    content: vec![ContentBlock::ToolResult {
+                    content: vec![ContentBlock::ToolResult(ToolResult {
                         tool_call_id: "call_1".to_string(),
-                        content: "Sunny, 22C".to_string(),
-                    }],
+                        content: vec![ToolResultContent::Text(TextContent {
+                            content: "Sunny, 22C".to_string(),
+                        })],
+                        is_error: false,
+                    })],
                 },
             ],
             tools: vec![],
@@ -621,17 +630,17 @@ mod tests {
     #[test]
     fn test_extract_text() {
         let blocks = vec![
-            ContentBlock::Text {
+            ContentBlock::Text(TextContent {
                 content: "Hello ".to_string(),
-            },
-            ContentBlock::Text {
+            }),
+            ContentBlock::Text(TextContent {
                 content: "world".to_string(),
-            },
-            ContentBlock::ToolCall {
+            }),
+            ContentBlock::ToolCall(ToolCall {
                 id: "1".to_string(),
                 name: "foo".to_string(),
                 arguments: serde_json::Value::Null,
-            },
+            }),
         ];
         assert_eq!(extract_text(&blocks), "Hello world");
     }
@@ -666,7 +675,7 @@ mod tests {
             .iter()
             .flat_map(|r| {
                 r.message.content.iter().filter_map(|b| match b {
-                    ContentBlock::Text { content } => Some(content.as_str()),
+                    ContentBlock::Text(t) => Some(t.content.as_str()),
                     _ => None,
                 })
             })
@@ -726,9 +735,9 @@ mod tests {
         let req = Request {
             messages: vec![Message {
                 role: "user".to_string(),
-                content: vec![ContentBlock::Text {
+                content: vec![ContentBlock::Text(TextContent {
                     content: "What is the weather in Tokyo? Use the get_weather tool.".to_string(),
-                }],
+                })],
             }],
             tools: vec![ToolDefinition {
                 name: "get_weather".to_string(),
@@ -808,12 +817,20 @@ mod tests {
             &self,
             _cancel: tokio::sync::watch::Receiver<bool>,
             _params: serde_json::Value,
-        ) -> Result<String, crate::core::tools::ToolError> {
-            Ok(serde_json::json!({
-                "city": "San Francisco",
-                "country": "US"
+        ) -> Result<crate::core::types::ToolResult, crate::core::tools::ToolError> {
+            Ok(crate::core::types::ToolResult {
+                tool_call_id: String::new(),
+                content: vec![crate::core::types::ToolResultContent::Text(
+                    crate::core::types::TextContent {
+                        content: serde_json::json!({
+                            "city": "San Francisco",
+                            "country": "US"
+                        })
+                        .to_string(),
+                    },
+                )],
+                is_error: false,
             })
-            .to_string())
         }
     }
 
@@ -840,13 +857,21 @@ mod tests {
             &self,
             _cancel: tokio::sync::watch::Receiver<bool>,
             _params: serde_json::Value,
-        ) -> Result<String, crate::core::tools::ToolError> {
-            Ok(serde_json::json!({
-                "temperature": "18°C",
-                "condition": "Foggy",
-                "humidity": "82%"
+        ) -> Result<crate::core::types::ToolResult, crate::core::tools::ToolError> {
+            Ok(crate::core::types::ToolResult {
+                tool_call_id: String::new(),
+                content: vec![crate::core::types::ToolResultContent::Text(
+                    crate::core::types::TextContent {
+                        content: serde_json::json!({
+                            "temperature": "18°C",
+                            "condition": "Foggy",
+                            "humidity": "82%"
+                        })
+                        .to_string(),
+                    },
+                )],
+                is_error: false,
             })
-            .to_string())
         }
     }
 
@@ -880,10 +905,10 @@ mod tests {
 
         let user_msg = Message {
             role: "user".into(),
-            content: vec![ContentBlock::Text {
+            content: vec![ContentBlock::Text(TextContent {
                 content: "What's the weather at my current location? Use the available tools to find out."
                     .to_string(),
-            }],
+            })],
         };
 
         agent
@@ -910,7 +935,7 @@ mod tests {
             msg.content.iter().any(|b| {
                 matches!(
                     b,
-                    ContentBlock::ToolCall { name, .. } if name == "get_current_location"
+                    ContentBlock::ToolCall(tc) if tc.name == "get_current_location"
                 )
             })
         });
@@ -924,7 +949,7 @@ mod tests {
             msg.content.iter().any(|b| {
                 matches!(
                     b,
-                    ContentBlock::ToolCall { name, .. } if name == "get_weather_by_location"
+                    ContentBlock::ToolCall(tc) if tc.name == "get_weather_by_location"
                 )
             })
         });

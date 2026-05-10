@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::core::types::ToolDefinition;
+use crate::core::types::{ToolDefinition, ToolResult};
 
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum ToolError {
@@ -22,7 +22,7 @@ pub trait ToolHandler: Send + Sync {
         &self,
         cancel: tokio::sync::watch::Receiver<bool>,
         params: serde_json::Value,
-    ) -> Result<String, ToolError>;
+    ) -> Result<ToolResult, ToolError>;
 }
 
 #[derive(Clone)]
