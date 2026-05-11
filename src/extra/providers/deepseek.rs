@@ -22,10 +22,7 @@ pub struct DeepSeekProvider {
 
 impl DeepSeekProvider {
     pub fn new(api_key: impl Into<String>) -> Self {
-        Self {
-            client: Client::new(),
-            api_key: api_key.into(),
-        }
+        Self { client: Client::new(), api_key: api_key.into() }
     }
 }
 
@@ -46,10 +43,7 @@ enum ApiMessage {
         tool_calls: Option<Vec<ApiToolCall>>,
     },
     #[serde(rename = "tool")]
-    Tool {
-        content: String,
-        tool_call_id: String,
-    },
+    Tool { content: String, tool_call_id: String },
 }
 
 #[derive(Serialize)]
@@ -169,16 +163,8 @@ fn build_messages(context: &Request) -> Vec<ApiMessage> {
                     .collect();
                 messages.push(ApiMessage::Assistant {
                     content: if text.is_empty() { None } else { Some(text) },
-                    reasoning_content: if reasoning.is_empty() {
-                        None
-                    } else {
-                        Some(reasoning)
-                    },
-                    tool_calls: if api_tcs.is_empty() {
-                        None
-                    } else {
-                        Some(api_tcs)
-                    },
+                    reasoning_content: if reasoning.is_empty() { None } else { Some(reasoning) },
+                    tool_calls: if api_tcs.is_empty() { None } else { Some(api_tcs) },
                 });
             }
             "tool" => {
@@ -346,13 +332,11 @@ async fn process_sse(
                 if let Some(tc_deltas) = choice.delta.tool_calls {
                     for tc in tc_deltas {
                         let entry =
-                            partial_tools
-                                .entry(tc.index)
-                                .or_insert_with(|| PartialToolCall {
-                                    id: String::new(),
-                                    name: String::new(),
-                                    arguments: String::new(),
-                                });
+                            partial_tools.entry(tc.index).or_insert_with(|| PartialToolCall {
+                                id: String::new(),
+                                name: String::new(),
+                                arguments: String::new(),
+                            });
                         if let Some(id) = tc.id {
                             entry.id = id;
                         }
@@ -414,10 +398,7 @@ async fn emit_done(
 
     let _ = tx
         .send(StreamResponse {
-            message: Message {
-                role: "assistant".to_string(),
-                content: vec![],
-            },
+            message: Message { role: "assistant".to_string(), content: vec![] },
             usage,
             stop_reason: Some("stop".to_string()),
         })
@@ -444,11 +425,7 @@ impl Provider for DeepSeekProvider {
             body["tools"] = serde_json::to_value(tools).unwrap();
         }
 
-        let base_url = if model.base_url.is_empty() {
-            DEFAULT_BASE_URL
-        } else {
-            &model.base_url
-        };
+        let base_url = if model.base_url.is_empty() { DEFAULT_BASE_URL } else { &model.base_url };
         let url = format!("{}/chat/completions", base_url);
 
         let mut req = self
@@ -461,10 +438,7 @@ impl Provider for DeepSeekProvider {
             req = req.header(key.as_str(), value.as_str());
         }
 
-        let response = req
-            .send()
-            .await
-            .map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
+        let response = req.send().await.map_err(|e| ProviderError::RequestFailed(e.to_string()))?;
 
         match response.status() {
             s if s == reqwest::StatusCode::TOO_MANY_REQUESTS => {
@@ -526,9 +500,7 @@ mod tests {
         Request {
             messages: vec![Message {
                 role: "user".to_string(),
-                content: vec![ContentBlock::Text(TextContent {
-                    content: prompt.to_string(),
-                })],
+                content: vec![ContentBlock::Text(TextContent { content: prompt.to_string() })],
             }],
             tools: vec![],
         }
@@ -552,9 +524,7 @@ mod tests {
                 },
                 Message {
                     role: "user".to_string(),
-                    content: vec![ContentBlock::Text(TextContent {
-                        content: "Hello".to_string(),
-                    })],
+                    content: vec![ContentBlock::Text(TextContent { content: "Hello".to_string() })],
                 },
             ],
             tools: vec![],
@@ -600,10 +570,7 @@ mod tests {
 
     #[test]
     fn test_build_tools_empty() {
-        let req = Request {
-            messages: vec![],
-            tools: vec![],
-        };
+        let req = Request { messages: vec![], tools: vec![] };
         assert!(build_tools(&req).is_none());
     }
 
@@ -630,12 +597,8 @@ mod tests {
     #[test]
     fn test_extract_text() {
         let blocks = vec![
-            ContentBlock::Text(TextContent {
-                content: "Hello ".to_string(),
-            }),
-            ContentBlock::Text(TextContent {
-                content: "world".to_string(),
-            }),
+            ContentBlock::Text(TextContent { content: "Hello ".to_string() }),
+            ContentBlock::Text(TextContent { content: "world".to_string() }),
             ContentBlock::ToolCall(ToolCall {
                 id: "1".to_string(),
                 name: "foo".to_string(),
@@ -666,10 +629,7 @@ mod tests {
         let stream = provider.stream(&model, &req).await.unwrap();
         let responses = collect_stream(stream).await;
 
-        assert!(
-            !responses.is_empty(),
-            "should receive at least one response"
-        );
+        assert!(!responses.is_empty(), "should receive at least one response");
 
         let combined_text: String = responses
             .iter()
@@ -718,10 +678,7 @@ mod tests {
         let responses = collect_stream(stream).await;
 
         let last = responses.last().expect("should have responses");
-        assert!(
-            last.stop_reason.is_some(),
-            "final response should have a stop_reason"
-        );
+        assert!(last.stop_reason.is_some(), "final response should have a stop_reason");
     }
 
     #[tokio::test]
@@ -756,12 +713,9 @@ mod tests {
             provider.stream(&model, &req).await.unwrap();
         let responses = collect_stream(stream).await;
 
-        let has_tool_call = responses.iter().any(|r| {
-            r.message
-                .content
-                .iter()
-                .any(|b| matches!(b, ContentBlock::ToolCall { .. }))
-        });
+        let has_tool_call = responses
+            .iter()
+            .any(|r| r.message.content.iter().any(|b| matches!(b, ContentBlock::ToolCall { .. })));
         assert!(has_tool_call, "model should return a tool call");
     }
 
@@ -892,11 +846,7 @@ mod tests {
         let model = test_model();
 
         let extension = Box::new(NoopExtension) as Box<dyn Extension>;
-        let agent_state = crate::core::agent::AgentState {
-            model,
-            tools,
-            messages: vec![],
-        };
+        let agent_state = crate::core::agent::AgentState { model, tools, messages: vec![] };
         let mut agent = crate::core::agent::Agent {
             state: agent_state,
             models: std::sync::Arc::new(registry),
@@ -911,10 +861,7 @@ mod tests {
             })],
         };
 
-        agent
-            .prompt(user_msg)
-            .await
-            .expect("agent run should succeed");
+        agent.prompt(user_msg).await.expect("agent run should succeed");
 
         let output = agent.state.messages;
 
@@ -939,10 +886,7 @@ mod tests {
                 )
             })
         });
-        assert!(
-            called_get_location,
-            "agent should have called get_current_location"
-        );
+        assert!(called_get_location, "agent should have called get_current_location");
 
         // Verify get_weather_by_location was called
         let called_get_weather = output.iter().any(|msg| {
@@ -953,17 +897,11 @@ mod tests {
                 )
             })
         });
-        assert!(
-            called_get_weather,
-            "agent should have called get_weather_by_location"
-        );
+        assert!(called_get_weather, "agent should have called get_weather_by_location");
 
         // Verify the final message is a text response from the assistant
         let last = output.last().expect("should have output");
-        let has_text = last
-            .content
-            .iter()
-            .any(|b| matches!(b, ContentBlock::Text { .. }));
+        let has_text = last.content.iter().any(|b| matches!(b, ContentBlock::Text { .. }));
         assert!(
             has_text && last.role == "assistant",
             "final message should be assistant text with weather info"

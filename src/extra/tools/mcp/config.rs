@@ -89,13 +89,7 @@ mod tests {
             r#"{"mcpServers":{"s":{"url":"http://localhost/mcp","headers":{"Authorization":"Bearer tok"}}}}"#,
         )
         .unwrap();
-        let http = cfg
-            .mcp_servers
-            .get("s")
-            .unwrap()
-            .clone()
-            .into_config()
-            .unwrap();
+        let http = cfg.mcp_servers.get("s").unwrap().clone().into_config().unwrap();
         assert_eq!(http.headers["Authorization"], "Bearer tok");
     }
 

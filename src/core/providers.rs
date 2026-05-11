@@ -40,10 +40,7 @@ impl StreamResponse {
     /// Start with an empty assistant response.
     pub fn new() -> Self {
         Self {
-            message: Message {
-                role: "assistant".to_string(),
-                content: Vec::new(),
-            },
+            message: Message { role: "assistant".to_string(), content: Vec::new() },
             usage: TokenUsage {
                 input_tokens: 0,
                 output_tokens: 0,
@@ -107,9 +104,7 @@ pub struct Registry {
 
 impl Registry {
     pub fn new() -> Self {
-        Self {
-            providers: HashMap::new(),
-        }
+        Self { providers: HashMap::new() }
     }
 
     pub fn register(&mut self, name: impl Into<String>, provider: Box<dyn Provider>) {

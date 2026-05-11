@@ -16,21 +16,11 @@ pub struct LabelExt {
 
 impl LabelExt {
     pub fn ok(label: &'static str) -> Self {
-        Self {
-            label,
-            should_fail: false,
-            deny_reason: None,
-            calls: Arc::new(Mutex::new(vec![])),
-        }
+        Self { label, should_fail: false, deny_reason: None, calls: Arc::new(Mutex::new(vec![])) }
     }
 
     pub fn fail(label: &'static str) -> Self {
-        Self {
-            label,
-            should_fail: true,
-            deny_reason: None,
-            calls: Arc::new(Mutex::new(vec![])),
-        }
+        Self { label, should_fail: true, deny_reason: None, calls: Arc::new(Mutex::new(vec![])) }
     }
 
     pub fn deny(label: &'static str, reason: &str) -> Self {
@@ -117,9 +107,7 @@ pub fn make_request(text: &str) -> Request {
     Request {
         messages: vec![Message {
             role: "user".into(),
-            content: vec![ContentBlock::Text(TextContent {
-                content: text.into(),
-            })],
+            content: vec![ContentBlock::Text(TextContent { content: text.into() })],
         }],
         tools: vec![],
     }

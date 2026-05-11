@@ -16,10 +16,7 @@ pub struct And {
 
 impl And {
     pub fn new<A: Into<Box<dyn Extension>>, B: Into<Box<dyn Extension>>>(a: A, b: B) -> Self {
-        Self {
-            a: a.into(),
-            b: b.into(),
-        }
+        Self { a: a.into(), b: b.into() }
     }
 }
 
@@ -70,15 +67,9 @@ impl Extension for And {
         name: &str,
         args: &serde_json::Value,
     ) -> Result<ToolCallDecision, ExtensionError> {
-        match self
-            .a
-            .on_tool_execution_start(tool_call_id, name, args)
-            .await?
-        {
+        match self.a.on_tool_execution_start(tool_call_id, name, args).await? {
             ToolCallDecision::Allow => {
-                self.b
-                    .on_tool_execution_start(tool_call_id, name, args)
-                    .await
+                self.b.on_tool_execution_start(tool_call_id, name, args).await
             }
             deny => Ok(deny),
         }
@@ -143,20 +134,16 @@ mod tests {
     #[tokio::test]
     async fn test_and_tool_execution_both_allow() {
         let mut ext = And::new(LabelExt::ok("a"), LabelExt::ok("b"));
-        let decision = ext
-            .on_tool_execution_start("", "tool", &serde_json::Value::Null)
-            .await
-            .unwrap();
+        let decision =
+            ext.on_tool_execution_start("", "tool", &serde_json::Value::Null).await.unwrap();
         assert!(matches!(decision, ToolCallDecision::Allow));
     }
 
     #[tokio::test]
     async fn test_and_tool_execution_first_denies() {
         let mut ext = And::new(LabelExt::deny("a", "nope"), LabelExt::ok("b"));
-        let decision = ext
-            .on_tool_execution_start("", "tool", &serde_json::Value::Null)
-            .await
-            .unwrap();
+        let decision =
+            ext.on_tool_execution_start("", "tool", &serde_json::Value::Null).await.unwrap();
         match decision {
             ToolCallDecision::Deny(r) => assert_eq!(r, "nope"),
             ToolCallDecision::Allow => panic!("expected Deny"),
@@ -170,9 +157,7 @@ mod tests {
         let result = ext.on_message_start(req).await.unwrap();
         assert_eq!(
             result.messages[0].content,
-            vec![ContentBlock::Text(crate::core::types::TextContent {
-                content: "hello".into()
-            })]
+            vec![ContentBlock::Text(crate::core::types::TextContent { content: "hello".into() })]
         );
     }
 }

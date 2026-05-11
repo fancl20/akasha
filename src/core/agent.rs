@@ -45,10 +45,7 @@ impl Agent {
             let mut state = self.extension.on_turn_start(self.state.clone()).await?;
 
             state.messages = agent_loop(
-                &Request {
-                    messages: state.messages.clone(),
-                    tools: state.tools.definitions(),
-                },
+                &Request { messages: state.messages.clone(), tools: state.tools.definitions() },
                 &state,
                 &self.models,
                 self.extension.as_mut(),
@@ -73,16 +70,10 @@ pub async fn agent_loop(
     extension: &mut dyn Extension,
 ) -> Result<Vec<Message>, AgentError> {
     let provider = models.get(&state.model.provider).ok_or_else(|| {
-        AgentError::Other(format!(
-            "no provider registered for '{}'",
-            state.model.provider
-        ))
+        AgentError::Other(format!("no provider registered for '{}'", state.model.provider))
     })?;
 
-    let mut request = Request {
-        messages: request.messages.clone(),
-        tools: request.tools.clone(),
-    };
+    let mut request = Request { messages: request.messages.clone(), tools: request.tools.clone() };
 
     loop {
         request = extension.on_message_start(request).await?;
@@ -114,9 +105,7 @@ pub async fn agent_loop(
         }
 
         for (id, name, arguments) in tool_calls {
-            let decision = extension
-                .on_tool_execution_start(&id, &name, &arguments)
-                .await?;
+            let decision = extension.on_tool_execution_start(&id, &name, &arguments).await?;
             if let ToolCallDecision::Deny(reason) = decision {
                 request.messages.push(Message {
                     role: "tool".to_string(),

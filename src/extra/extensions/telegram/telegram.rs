@@ -5,20 +5,22 @@ use std::time::{Duration, SystemTime};
 use teloxide::dispatching::dialogue::{Dialogue, InMemStorage};
 use teloxide::dispatching::{Dispatcher, UpdateFilterExt, UpdateHandler, dialogue};
 use teloxide::prelude::Requester;
-use teloxide::types::{ChatAction, ChatId, Message as TgMessage, Update};
+use teloxide::sugar::request::RequestLinkPreviewExt;
+use teloxide::types::{ChatAction, ChatId, Message as TgMessage, MessageId, Update};
 use teloxide::utils::command::BotCommands;
 use teloxide::{ApiError, Bot, RequestError, dptree};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinSet;
 
 use crate::core::agent::{Agent, AgentState};
-use crate::core::extensions::{Extension, ExtensionError};
+use crate::core::extensions::{Extension, ExtensionError, ToolCallDecision};
 use crate::core::providers::StreamResponse;
 use crate::core::types::{ContentBlock, Message, TextContent};
 use crate::extra::extensions::combinator::And;
 
 enum StreamEvent {
     Append(ContentBlock),
+    Notification(String),
     Finish(oneshot::Sender<Result<(), ExtensionError>>),
 }
 
@@ -35,42 +37,47 @@ impl Extension for TelegramExtension {
 
     async fn on_message_update(&mut self, chunk: &StreamResponse) -> Result<(), ExtensionError> {
         for block in &chunk.message.content {
-            self.tx
-                .send(StreamEvent::Append(block.clone()))
-                .map_err(|_| ExtensionError::ExtensionFailed {
+            self.tx.send(StreamEvent::Append(block.clone())).map_err(|_| {
+                ExtensionError::ExtensionFailed {
                     name: "telegram".to_string(),
                     message: "updater task dropped".to_string(),
-                })?;
+                }
+            })?;
         }
-
         Ok(())
     }
 
-    async fn on_message_end(&mut self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
-        let (tx, rx) = oneshot::channel();
-        self.tx
-            .send(StreamEvent::Finish(tx))
-            .map_err(|_| ExtensionError::ExtensionFailed {
+    async fn on_tool_execution_start(
+        &mut self,
+        _tool_call_id: &str,
+        name: &str,
+        args: &serde_json::Value,
+    ) -> Result<ToolCallDecision, ExtensionError> {
+        let notification = format!("Tool: {}: {}", name, args);
+        self.tx.send(StreamEvent::Notification(notification)).map_err(|_| {
+            ExtensionError::ExtensionFailed {
                 name: "telegram".to_string(),
                 message: "updater task dropped".to_string(),
-            })?;
-
-        rx.await.map_err(|_| ExtensionError::ExtensionFailed {
-            name: "telegram".to_string(),
-            message: "updater task dropped".to_string(),
-        })?
+            }
+        })?;
+        Ok(ToolCallDecision::Allow)
     }
 
     async fn on_turn_end(&mut self, mut state: AgentState) -> Result<AgentState, ExtensionError> {
-        state.messages.push(
-            self.rx
-                .recv()
-                .await
-                .ok_or(ExtensionError::ExtensionFailed {
-                    name: "telegram".to_string(),
-                    message: "input channel dropped".to_string(),
-                })?,
-        );
+        let (tx, rx) = oneshot::channel();
+        self.tx.send(StreamEvent::Finish(tx)).map_err(|_| ExtensionError::ExtensionFailed {
+            name: "telegram".to_string(),
+            message: "updater task dropped".to_string(),
+        })?;
+        let _ = rx.await.map_err(|_| ExtensionError::ExtensionFailed {
+            name: "telegram".to_string(),
+            message: "updater task dropped".to_string(),
+        })?;
+
+        state.messages.push(self.rx.recv().await.ok_or(ExtensionError::ExtensionFailed {
+            name: "telegram".to_string(),
+            message: "input channel dropped".to_string(),
+        })?);
         Ok(state)
     }
 }
@@ -81,6 +88,26 @@ async fn update_chat(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<
     let mut pending = String::new();
     let mut message_id = None;
     let mut wait_until = SystemTime::UNIX_EPOCH;
+
+    let update_message = async |id: Option<MessageId>, sending: &str| match (id, sending) {
+        (_, "") => id,
+        (Some(id), sending) => {
+            match bot.edit_message_text(chat_id, id, sending).disable_link_preview(true).await {
+                Ok(_) | Err(RequestError::Api(ApiError::MessageNotModified)) => (),
+                Err(e) => eprintln!("telegram edit error: {e}"),
+            };
+            Some(id)
+        }
+        (None, sending) => {
+            match bot.send_message(chat_id, sending).disable_link_preview(true).await {
+                Ok(msg) => Some(msg.id),
+                Err(e) => {
+                    eprintln!("telegram send error: {e}");
+                    None
+                }
+            }
+        }
+    };
 
     loop {
         let event = match rx.try_recv() {
@@ -94,6 +121,9 @@ async fn update_chat(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<
             Some(StreamEvent::Append(ContentBlock::Text(t))) => pending.push_str(&t.content),
             Some(StreamEvent::Append(ContentBlock::Reasoning { .. })) => (), // Allow reasoning event to trigger typing action.
             Some(StreamEvent::Append(..)) => continue,
+            Some(StreamEvent::Notification(t)) if pending.is_empty() => {
+                message_id = update_message(message_id, &t[..t.ceil_char_boundary(512)]).await
+            }
             Some(StreamEvent::Finish(done)) => {
                 finish_tx = Some(done);
                 pending.push('\n');
@@ -108,27 +138,14 @@ async fn update_chat(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<
         }
 
         while !pending.trim().is_empty() {
-            let end = pending
-                .char_indices()
-                .nth(4095)
-                .map(|(i, c)| i + c.len_utf8());
+            let end = pending.char_indices().nth(4095).map(|(i, c)| i + c.len_utf8());
             let boundary = pending[..end.unwrap_or(pending.len())]
                 .rfind("\n")
                 .map(|i| i + 1)
                 .or(end)
                 .unwrap_or(pending.len());
 
-            match (message_id, pending[..boundary].trim()) {
-                (_, "") => (),
-                (Some(id), sending) => match bot.edit_message_text(chat_id, id, sending).await {
-                    Ok(_) | Err(RequestError::Api(ApiError::MessageNotModified)) => (),
-                    Err(e) => eprintln!("telegram edit error: {e}"),
-                },
-                (None, sending) => match bot.send_message(chat_id, sending).await {
-                    Ok(msg) => message_id = Some(msg.id),
-                    Err(e) => eprintln!("telegram send error: {e}"),
-                },
-            }
+            message_id = update_message(message_id, pending[..boundary].trim()).await;
             wait_until = SystemTime::now() + Duration::from_secs(4);
 
             if end.is_some() {
@@ -191,8 +208,7 @@ async fn command_handler(
             bot.send_message(msg.chat.id, "Agent reseted.").await?;
         }
         Command::Help => {
-            bot.send_message(msg.chat.id, Command::descriptions().to_string())
-                .await?;
+            bot.send_message(msg.chat.id, Command::descriptions().to_string()).await?;
         }
     }
     Ok(())
@@ -207,9 +223,7 @@ async fn handle_message(
     let prompt = if let Some(text) = msg.text() {
         Message {
             role: "user".into(),
-            content: vec![ContentBlock::Text(TextContent {
-                content: text.to_owned(),
-            })],
+            content: vec![ContentBlock::Text(TextContent { content: text.to_owned() })],
         }
     } else {
         return Ok(());
@@ -221,14 +235,8 @@ async fn handle_message(
             let (msg_tx, msg_rx) = mpsc::unbounded_channel();
 
             let mut agent = agent_factory();
-            agent.extension = And::new(
-                agent.extension,
-                TelegramExtension {
-                    tx: event_tx,
-                    rx: msg_rx,
-                },
-            )
-            .into();
+            agent.extension =
+                And::new(agent.extension, TelegramExtension { tx: event_tx, rx: msg_rx }).into();
 
             let mut tasks = JoinSet::new();
             tasks.spawn(async move {
@@ -238,12 +246,7 @@ async fn handle_message(
             });
             tasks.spawn(update_chat(bot, msg.chat.id, event_rx));
 
-            dialogue
-                .update(State::Running {
-                    tasks: Arc::new(tasks),
-                    tx: msg_tx,
-                })
-                .await?;
+            dialogue.update(State::Running { tasks: Arc::new(tasks), tx: msg_tx }).await?;
         }
         State::Running { tasks: _, tx } => {
             tx.send(prompt)?;
@@ -256,11 +259,8 @@ async fn handle_message(
 fn schema(
     ids: Arc<HashSet<u64>>,
 ) -> UpdateHandler<Box<dyn std::error::Error + Send + Sync + 'static>> {
-    let allowed_filter = move |msg: TgMessage| {
-        msg.from
-            .map(|user| ids.contains(&user.id.0))
-            .unwrap_or_default()
-    };
+    let allowed_filter =
+        move |msg: TgMessage| msg.from.map(|user| ids.contains(&user.id.0)).unwrap_or_default();
 
     let command_handler = teloxide::filter_command::<Command, _>()
         .branch(dptree::case![Command::Help].endpoint(command_handler))

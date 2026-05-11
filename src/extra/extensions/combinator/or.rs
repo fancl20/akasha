@@ -17,10 +17,7 @@ pub struct Or {
 
 impl Or {
     pub fn new<A: Into<Box<dyn Extension>>, B: Into<Box<dyn Extension>>>(a: A, b: B) -> Self {
-        Self {
-            a: a.into(),
-            b: b.into(),
-        }
+        Self { a: a.into(), b: b.into() }
     }
 }
 
@@ -85,16 +82,10 @@ impl Extension for Or {
         name: &str,
         args: &serde_json::Value,
     ) -> Result<ToolCallDecision, ExtensionError> {
-        match self
-            .a
-            .on_tool_execution_start(tool_call_id, name, args)
-            .await?
-        {
+        match self.a.on_tool_execution_start(tool_call_id, name, args).await? {
             ToolCallDecision::Allow => Ok(ToolCallDecision::Allow),
             ToolCallDecision::Deny(_) => {
-                self.b
-                    .on_tool_execution_start(tool_call_id, name, args)
-                    .await
+                self.b.on_tool_execution_start(tool_call_id, name, args).await
             }
         }
     }
@@ -104,11 +95,7 @@ impl Extension for Or {
         tool_call_id: &str,
         result: Result<ToolResult, ToolError>,
     ) -> Result<Result<ToolResult, ToolError>, ExtensionError> {
-        match self
-            .a
-            .tool_execution_end(tool_call_id, result.clone())
-            .await
-        {
+        match self.a.tool_execution_end(tool_call_id, result.clone()).await {
             Ok(r) => Ok(r),
             Err(_) => self.b.tool_execution_end(tool_call_id, result).await,
         }
@@ -166,33 +153,24 @@ mod tests {
     #[tokio::test]
     async fn test_or_tool_execution_first_allows() {
         let mut ext = Or::new(LabelExt::ok("a"), LabelExt::ok("b"));
-        let decision = ext
-            .on_tool_execution_start("", "tool", &serde_json::Value::Null)
-            .await
-            .unwrap();
+        let decision =
+            ext.on_tool_execution_start("", "tool", &serde_json::Value::Null).await.unwrap();
         assert!(matches!(decision, ToolCallDecision::Allow));
     }
 
     #[tokio::test]
     async fn test_or_tool_execution_first_denies_second_overrides() {
         let mut ext = Or::new(LabelExt::deny("a", "nope"), LabelExt::ok("b"));
-        let decision = ext
-            .on_tool_execution_start("", "tool", &serde_json::Value::Null)
-            .await
-            .unwrap();
+        let decision =
+            ext.on_tool_execution_start("", "tool", &serde_json::Value::Null).await.unwrap();
         assert!(matches!(decision, ToolCallDecision::Allow));
     }
 
     #[tokio::test]
     async fn test_or_tool_execution_both_deny() {
-        let mut ext = Or::new(
-            LabelExt::deny("a", "nope"),
-            LabelExt::deny("b", "also nope"),
-        );
-        let decision = ext
-            .on_tool_execution_start("", "tool", &serde_json::Value::Null)
-            .await
-            .unwrap();
+        let mut ext = Or::new(LabelExt::deny("a", "nope"), LabelExt::deny("b", "also nope"));
+        let decision =
+            ext.on_tool_execution_start("", "tool", &serde_json::Value::Null).await.unwrap();
         match decision {
             ToolCallDecision::Deny(r) => assert_eq!(r, "also nope"),
             ToolCallDecision::Allow => panic!("expected Deny"),

@@ -50,11 +50,8 @@ impl ToolHandler for McpTool {
             req = req.with_arguments(args);
         }
 
-        let result = self
-            .peer
-            .call_tool(req)
-            .await
-            .map_err(|e| ToolError::Execution(e.to_string()))?;
+        let result =
+            self.peer.call_tool(req).await.map_err(|e| ToolError::Execution(e.to_string()))?;
 
         let content = to_result_content(&result);
 
@@ -62,11 +59,7 @@ impl ToolHandler for McpTool {
             let text = text_from_content(&content);
             Err(ToolError::Execution(text))
         } else {
-            Ok(ToolResult {
-                tool_call_id: String::new(),
-                content,
-                is_error: false,
-            })
+            Ok(ToolResult { tool_call_id: String::new(), content, is_error: false })
         }
     }
 }
@@ -74,22 +67,14 @@ impl ToolHandler for McpTool {
 impl From<&RawContent> for ToolResultContent {
     fn from(raw: &RawContent) -> Self {
         match raw {
-            RawContent::Text(t) => ToolResultContent::Text(TextContent {
-                content: t.text.clone(),
-            }),
+            RawContent::Text(t) => ToolResultContent::Text(TextContent { content: t.text.clone() }),
             RawContent::Resource(r) => match &r.resource {
                 rmcp::model::ResourceContents::TextResourceContents { text, .. } => {
-                    ToolResultContent::Text(TextContent {
-                        content: text.clone(),
-                    })
+                    ToolResultContent::Text(TextContent { content: text.clone() })
                 }
-                _ => ToolResultContent::Text(TextContent {
-                    content: format!("{raw:?}"),
-                }),
+                _ => ToolResultContent::Text(TextContent { content: format!("{raw:?}") }),
             },
-            _ => ToolResultContent::Text(TextContent {
-                content: format!("{raw:?}"),
-            }),
+            _ => ToolResultContent::Text(TextContent { content: format!("{raw:?}") }),
         }
     }
 }
@@ -166,10 +151,8 @@ pub async fn register(
     );
     let service = ().serve(transport).await.map_err(|e| McpToolError::Connection(e.to_string()))?;
     let service = Arc::new(service);
-    let tools = service
-        .list_all_tools()
-        .await
-        .map_err(|e| McpToolError::Discovery(e.to_string()))?;
+    let tools =
+        service.list_all_tools().await.map_err(|e| McpToolError::Discovery(e.to_string()))?;
 
     for tool in tools {
         let definition = ToolDefinition {
