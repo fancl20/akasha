@@ -71,7 +71,6 @@ impl Extension for TelegramExtension {
                     message: "input channel dropped".to_string(),
                 })?,
         );
-
         Ok(state)
     }
 }

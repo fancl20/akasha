@@ -9,6 +9,7 @@ use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig
 
 use crate::core::tools::{ToolError, ToolHandler, ToolRegistry};
 use crate::core::types::{TextContent, ToolDefinition, ToolResult, ToolResultContent};
+use crate::extra::tools::mcp::config;
 
 /// Error type for MCP connection and tool discovery.
 #[derive(Debug, thiserror::Error)]
@@ -127,29 +128,41 @@ fn text_from_content(content: &[ToolResultContent]) -> String {
 /// ```ignore
 /// use akasha::core::tools::ToolRegistry;
 /// use akasha::extra::tools::mcp;
+/// use akasha::extra::tools::mcp::config::StreamableHttpConfig;
 ///
 /// let mut tools = ToolRegistry::new();
 /// let service = mcp::register(
 ///     &mut tools,
-///     "http://localhost:8000/mcp",
-///     HeaderMap::new(),
+///     &StreamableHttpConfig {
+///         url: "http://localhost:8000/mcp".to_string(),
+///         headers: Default::default(),
+///     },
 /// )
 /// .await
 /// .unwrap();
 /// ```
 pub async fn register(
     registry: &mut ToolRegistry,
-    uri: &str,
-    headers: reqwest::header::HeaderMap,
+    server: &config::StreamableHttpConfig,
 ) -> Result<Arc<RunningService<RoleClient, ()>>, McpToolError> {
+    let mut header_map = reqwest::header::HeaderMap::new();
+    for (key, value) in &server.headers {
+        let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
+            .map_err(|e| McpToolError::Connection(format!("invalid header name '{key}': {e}")))?;
+        let val = reqwest::header::HeaderValue::from_str(value).map_err(|e| {
+            McpToolError::Connection(format!("invalid header value for '{key}': {e}"))
+        })?;
+        header_map.insert(name, val);
+    }
+
     let client = reqwest::Client::builder()
-        .default_headers(headers)
+        .default_headers(header_map)
         .build()
         .map_err(|e| McpToolError::Connection(e.to_string()))?;
 
     let transport = StreamableHttpClientTransport::with_client(
         client,
-        StreamableHttpClientTransportConfig::with_uri(uri),
+        StreamableHttpClientTransportConfig::with_uri(&*server.url),
     );
     let service = ().serve(transport).await.map_err(|e| McpToolError::Connection(e.to_string()))?;
     let service = Arc::new(service);
