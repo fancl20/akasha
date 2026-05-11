@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 use teloxide::dispatching::dialogue::{Dialogue, InMemStorage};
 use teloxide::dispatching::{Dispatcher, UpdateFilterExt, UpdateHandler, dialogue};
@@ -178,8 +178,7 @@ enum State {
     #[default]
     Idle,
     Running {
-        #[allow(unused)]
-        tasks: Arc<JoinSet<()>>,
+        tasks: Arc<Mutex<JoinSet<()>>>,
         tx: mpsc::UnboundedSender<Message>,
     },
 }
@@ -204,8 +203,11 @@ async fn command_handler(
 ) -> HandlerResult {
     match cmd {
         Command::Reset => {
+            if let Ok(State::Running { tasks, .. }) = dialogue.get_or_default().await {
+                tasks.lock().expect("tasks lock poisoned").abort_all();
+            }
             dialogue.exit().await?;
-            bot.send_message(msg.chat.id, "Agent reseted.").await?;
+            bot.send_message(msg.chat.id, "agent aborted and reset.").await?;
         }
         Command::Help => {
             bot.send_message(msg.chat.id, Command::descriptions().to_string()).await?;
@@ -246,7 +248,9 @@ async fn handle_message(
             });
             tasks.spawn(update_chat(bot, msg.chat.id, event_rx));
 
-            dialogue.update(State::Running { tasks: Arc::new(tasks), tx: msg_tx }).await?;
+            dialogue
+                .update(State::Running { tasks: Arc::new(Mutex::new(tasks)), tx: msg_tx })
+                .await?;
         }
         State::Running { tasks: _, tx } => {
             tx.send(prompt)?;
