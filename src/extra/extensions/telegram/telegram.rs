@@ -53,7 +53,7 @@ impl Extension for TelegramExtension {
         name: &str,
         args: &serde_json::Value,
     ) -> Result<ToolCallDecision, ExtensionError> {
-        let notification = format!("Tool: {}: {}", name, args);
+        let notification = format!("{name}: {args}");
         self.tx.send(StreamEvent::Notification(notification)).map_err(|_| {
             ExtensionError::ExtensionFailed {
                 name: "telegram".to_string(),
@@ -189,7 +189,7 @@ type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Bot commands")]
 enum Command {
-    #[command(description = "reset agent status")]
+    #[command(description = "abort and reset agent")]
     Reset,
     #[command(description = "show available commands")]
     Help,
@@ -243,7 +243,7 @@ async fn handle_message(
             let mut tasks = JoinSet::new();
             tasks.spawn(async move {
                 if let Err(e) = agent.prompt(prompt).await {
-                    eprintln!("agent prompt error: {}", e);
+                    eprintln!("agent prompt error: {e}");
                 }
             });
             tasks.spawn(update_chat(bot, msg.chat.id, event_rx));
@@ -282,10 +282,13 @@ pub async fn dispatch(
     token: impl Into<String>,
     allowed_ids: HashSet<u64>,
     agent_factory: Arc<dyn Fn() -> Agent + Send + Sync + 'static>,
-) {
-    Dispatcher::builder(Bot::new(token.into()), schema(Arc::new(allowed_ids)))
+) -> Result<(), RequestError> {
+    let bot = Bot::new(token.into());
+    bot.set_my_commands(Command::bot_commands()).await?;
+    Dispatcher::builder(bot, schema(Arc::new(allowed_ids)))
         .dependencies(dptree::deps![InMemStorage::<State>::new(), agent_factory])
         .build()
         .dispatch()
         .await;
+    Ok(())
 }

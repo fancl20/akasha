@@ -29,8 +29,6 @@ struct Cli {
 
     #[arg(long, env = "DEEPSEEK_API_KEY", hide_env_values = true)]
     deepseek: Option<String>,
-    #[arg(long, env = "OPENAI_API_KEY", hide_env_values = true)]
-    openai: Option<String>,
 }
 
 impl Cli {
@@ -89,7 +87,7 @@ async fn main() {
         })],
     };
 
-    telegram::dispatch(
+    if let Err(e) = telegram::dispatch(
         cli.telegram_token,
         allowed_ids,
         Arc::new(move || Agent {
@@ -102,5 +100,8 @@ async fn main() {
             extension: Box::new(NoopExtension),
         }),
     )
-    .await;
+    .await
+    {
+        panic!("dispatch error: {e}")
+    };
 }
