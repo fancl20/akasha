@@ -52,9 +52,9 @@ impl ServerEntry {
     pub fn into_config(self) -> Result<StreamableHttpConfig, McpConfigError> {
         match self {
             Self::StreamableHttp(cfg) => Ok(cfg),
-            Self::Unknown(v) => Err(McpConfigError::InvalidConfig {
-                detail: format!("unrecognised server config: {v}"),
-            }),
+            Self::Unknown(v) => {
+                Err(McpConfigError::InvalidConfig { detail: format!("unrecognised server config: {v}") })
+            }
         }
     }
 }
@@ -75,8 +75,7 @@ mod tests {
 
     #[test]
     fn minimal_streamable_http() {
-        let cfg: McpConfig =
-            serde_json::from_str(r#"{"mcpServers":{"s":{"url":"http://localhost/mcp"}}}"#).unwrap();
+        let cfg: McpConfig = serde_json::from_str(r#"{"mcpServers":{"s":{"url":"http://localhost/mcp"}}}"#).unwrap();
         let entry = cfg.mcp_servers.get("s").unwrap().clone();
         let http = entry.into_config().unwrap();
         assert_eq!(http.url, "http://localhost/mcp");
@@ -95,8 +94,7 @@ mod tests {
 
     #[test]
     fn servers_alias() {
-        let cfg: McpConfig =
-            serde_json::from_str(r#"{"servers":{"s":{"url":"http://localhost/mcp"}}}"#).unwrap();
+        let cfg: McpConfig = serde_json::from_str(r#"{"servers":{"s":{"url":"http://localhost/mcp"}}}"#).unwrap();
         assert!(cfg.mcp_servers.contains_key("s"));
     }
 

@@ -6,12 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
 
-use crate::core::providers::{
-    Model, Provider, ProviderError, StreamResponse, StreamResponseStream,
-};
-use crate::core::types::{
-    ContentBlock, Message, Request, TextContent, TokenUsage, ToolCall, ToolResultContent,
-};
+use crate::core::providers::{Model, Provider, ProviderError, StreamResponse, StreamResponseStream};
+use crate::core::types::{ContentBlock, Message, TextContent, TokenUsage, ToolCall, ToolDefinition, ToolResultContent};
 
 const DEFAULT_BASE_URL: &str = "https://api.deepseek.com";
 
@@ -130,18 +126,18 @@ struct ChunkUsage {
     prompt_cache_miss_tokens: Option<u64>,
 }
 
-fn build_messages(context: &Request) -> Vec<ApiMessage> {
-    let mut messages = Vec::new();
+fn build_messages(messages: &Vec<Message>) -> Vec<ApiMessage> {
+    let mut out = Vec::new();
 
-    for msg in &context.messages {
+    for msg in messages {
         match msg.role.as_str() {
             "system" => {
                 let text = extract_text(&msg.content);
-                messages.push(ApiMessage::System { content: text });
+                out.push(ApiMessage::System { content: text });
             }
             "user" => {
                 let text = extract_text(&msg.content);
-                messages.push(ApiMessage::User { content: text });
+                out.push(ApiMessage::User { content: text });
             }
             "assistant" => {
                 let text = extract_text(&msg.content);
@@ -153,15 +149,12 @@ fn build_messages(context: &Request) -> Vec<ApiMessage> {
                         ContentBlock::ToolCall(tc) => Some(ApiToolCall {
                             id: tc.id.clone(),
                             r#type: "function".to_string(),
-                            function: ApiFunctionCall {
-                                name: tc.name.clone(),
-                                arguments: tc.arguments.to_string(),
-                            },
+                            function: ApiFunctionCall { name: tc.name.clone(), arguments: tc.arguments.to_string() },
                         }),
                         _ => None,
                     })
                     .collect();
-                messages.push(ApiMessage::Assistant {
+                out.push(ApiMessage::Assistant {
                     content: if text.is_empty() { None } else { Some(text) },
                     reasoning_content: if reasoning.is_empty() { None } else { Some(reasoning) },
                     tool_calls: if api_tcs.is_empty() { None } else { Some(api_tcs) },
@@ -178,10 +171,7 @@ fn build_messages(context: &Request) -> Vec<ApiMessage> {
                                 _ => None,
                             })
                             .collect();
-                        messages.push(ApiMessage::Tool {
-                            content: text,
-                            tool_call_id: result.tool_call_id.clone(),
-                        });
+                        out.push(ApiMessage::Tool { content: text, tool_call_id: result.tool_call_id.clone() });
                     }
                 }
             }
@@ -189,16 +179,15 @@ fn build_messages(context: &Request) -> Vec<ApiMessage> {
         }
     }
 
-    messages
+    out
 }
 
-fn build_tools(context: &Request) -> Option<Vec<ApiTool>> {
-    if context.tools.is_empty() {
+fn build_tools(tools: &Vec<ToolDefinition>) -> Option<Vec<ApiTool>> {
+    if tools.is_empty() {
         return None;
     }
     Some(
-        context
-            .tools
+        tools
             .iter()
             .map(|t| ApiTool {
                 r#type: "function".to_string(),
@@ -313,9 +302,7 @@ async fn process_sse(
                             .send(StreamResponse {
                                 message: Message {
                                     role: "assistant".to_string(),
-                                    content: vec![ContentBlock::Reasoning(TextContent {
-                                        content: reasoning,
-                                    })],
+                                    content: vec![ContentBlock::Reasoning(TextContent { content: reasoning })],
                                 },
                                 usage: TokenUsage {
                                     input_tokens: 0,
@@ -331,12 +318,11 @@ async fn process_sse(
 
                 if let Some(tc_deltas) = choice.delta.tool_calls {
                     for tc in tc_deltas {
-                        let entry =
-                            partial_tools.entry(tc.index).or_insert_with(|| PartialToolCall {
-                                id: String::new(),
-                                name: String::new(),
-                                arguments: String::new(),
-                            });
+                        let entry = partial_tools.entry(tc.index).or_insert_with(|| PartialToolCall {
+                            id: String::new(),
+                            name: String::new(),
+                            arguments: String::new(),
+                        });
                         if let Some(id) = tc.id {
                             entry.id = id;
                         }
@@ -353,19 +339,11 @@ async fn process_sse(
                     let indices: Vec<usize> = partial_tools.keys().copied().collect();
                     for idx in indices {
                         if let Some(ptc) = partial_tools.remove(&idx) {
-                            let args = serde_json::from_str(&ptc.arguments)
-                                .unwrap_or(serde_json::Value::Null);
-                            let tc = ContentBlock::ToolCall(ToolCall {
-                                id: ptc.id,
-                                name: ptc.name,
-                                arguments: args,
-                            });
+                            let args = serde_json::from_str(&ptc.arguments).unwrap_or(serde_json::Value::Null);
+                            let tc = ContentBlock::ToolCall(ToolCall { id: ptc.id, name: ptc.name, arguments: args });
                             let _ = tx
                                 .send(StreamResponse {
-                                    message: Message {
-                                        role: "assistant".to_string(),
-                                        content: vec![tc],
-                                    },
+                                    message: Message { role: "assistant".to_string(), content: vec![tc] },
                                     usage: TokenUsage {
                                         input_tokens: 0,
                                         output_tokens: 0,
@@ -385,10 +363,7 @@ async fn process_sse(
     emit_done(&mut tx, &last_usage).await;
 }
 
-async fn emit_done(
-    tx: &mut futures::channel::mpsc::Sender<StreamResponse>,
-    usage: &Option<TokenUsage>,
-) {
+async fn emit_done(tx: &mut futures::channel::mpsc::Sender<StreamResponse>, usage: &Option<TokenUsage>) {
     let usage = usage.clone().unwrap_or(TokenUsage {
         input_tokens: 0,
         output_tokens: 0,
@@ -410,29 +385,26 @@ impl Provider for DeepSeekProvider {
     async fn stream(
         &self,
         model: &Model,
-        context: &Request,
+        messages: &Vec<Message>,
+        tools: &Vec<ToolDefinition>,
     ) -> Result<StreamResponseStream, ProviderError> {
-        let messages = build_messages(context);
-        let tools = build_tools(context);
+        let api_messages = build_messages(messages);
+        let api_tools = build_tools(tools);
 
         let mut body = serde_json::json!({
             "model": model.id,
-            "messages": messages,
+            "messages": api_messages,
             "stream": true,
             "stream_options": { "include_usage": true },
         });
-        if let Some(tools) = tools {
+        if let Some(tools) = api_tools {
             body["tools"] = serde_json::to_value(tools).unwrap();
         }
 
         let base_url = if model.base_url.is_empty() { DEFAULT_BASE_URL } else { &model.base_url };
         let url = format!("{}/chat/completions", base_url);
 
-        let mut req = self
-            .client
-            .post(&url)
-            .header("Authorization", format!("Bearer {}", self.api_key))
-            .json(&body);
+        let mut req = self.client.post(&url).header("Authorization", format!("Bearer {}", self.api_key)).json(&body);
 
         for (key, value) in &model.headers {
             req = req.header(key.as_str(), value.as_str());
@@ -477,9 +449,7 @@ mod tests {
     use crate::core::extensions::{Extension, NoopExtension};
     use crate::core::providers::{Model, Provider, Registry};
     use crate::core::tools::{ToolHandler, ToolRegistry};
-    use crate::core::types::{
-        ContentBlock, Message, Request, TextContent, ToolDefinition, ToolResult, ToolResultContent,
-    };
+    use crate::core::types::{ContentBlock, Message, TextContent, ToolDefinition, ToolResult, ToolResultContent};
     use futures::StreamExt;
 
     fn api_key() -> Option<String> {
@@ -496,14 +466,11 @@ mod tests {
         }
     }
 
-    fn simple_request(prompt: &str) -> Request {
-        Request {
-            messages: vec![Message {
-                role: "user".to_string(),
-                content: vec![ContentBlock::Text(TextContent { content: prompt.to_string() })],
-            }],
-            tools: vec![],
-        }
+    fn simple_messages(prompt: &str) -> Vec<Message> {
+        vec![Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text(TextContent { content: prompt.to_string() })],
+        }]
     }
 
     async fn collect_stream(stream: StreamResponseStream) -> Vec<StreamResponse> {
@@ -514,84 +481,69 @@ mod tests {
 
     #[test]
     fn test_build_messages_user_and_system() {
-        let req = Request {
-            messages: vec![
-                Message {
-                    role: "system".to_string(),
-                    content: vec![ContentBlock::Text(TextContent {
-                        content: "You are helpful.".to_string(),
-                    })],
-                },
-                Message {
-                    role: "user".to_string(),
-                    content: vec![ContentBlock::Text(TextContent { content: "Hello".to_string() })],
-                },
-            ],
-            tools: vec![],
-        };
-        let messages = build_messages(&req);
-        assert_eq!(messages.len(), 2);
+        let messages = vec![
+            Message {
+                role: "system".to_string(),
+                content: vec![ContentBlock::Text(TextContent { content: "You are helpful.".to_string() })],
+            },
+            Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text(TextContent { content: "Hello".to_string() })],
+            },
+        ];
+        let api_messages = build_messages(&messages);
+        assert_eq!(api_messages.len(), 2);
     }
 
     #[test]
     fn test_build_messages_with_tool_result() {
-        let req = Request {
-            messages: vec![
-                Message {
-                    role: "user".to_string(),
-                    content: vec![ContentBlock::Text(TextContent {
-                        content: "What's the weather?".to_string(),
-                    })],
-                },
-                Message {
-                    role: "assistant".to_string(),
-                    content: vec![ContentBlock::ToolCall(ToolCall {
-                        id: "call_1".to_string(),
-                        name: "get_weather".to_string(),
-                        arguments: serde_json::json!({"city": "Tokyo"}),
-                    })],
-                },
-                Message {
-                    role: "tool".to_string(),
-                    content: vec![ContentBlock::ToolResult(ToolResult {
-                        tool_call_id: "call_1".to_string(),
-                        content: vec![ToolResultContent::Text(TextContent {
-                            content: "Sunny, 22C".to_string(),
-                        })],
-                        is_error: false,
-                    })],
-                },
-            ],
-            tools: vec![],
-        };
-        let messages = build_messages(&req);
-        assert_eq!(messages.len(), 3);
+        let messages = vec![
+            Message {
+                role: "user".to_string(),
+                content: vec![ContentBlock::Text(TextContent { content: "What's the weather?".to_string() })],
+            },
+            Message {
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::ToolCall(ToolCall {
+                    id: "call_1".to_string(),
+                    name: "get_weather".to_string(),
+                    arguments: serde_json::json!({"city": "Tokyo"}),
+                })],
+            },
+            Message {
+                role: "tool".to_string(),
+                content: vec![ContentBlock::ToolResult(ToolResult {
+                    tool_call_id: "call_1".to_string(),
+                    content: vec![ToolResultContent::Text(TextContent { content: "Sunny, 22C".to_string() })],
+                    is_error: false,
+                })],
+            },
+        ];
+        let api_messages = build_messages(&messages);
+        assert_eq!(api_messages.len(), 3);
     }
 
     #[test]
     fn test_build_tools_empty() {
-        let req = Request { messages: vec![], tools: vec![] };
-        assert!(build_tools(&req).is_none());
+        let tools: Vec<ToolDefinition> = vec![];
+        assert!(build_tools(&tools).is_none());
     }
 
     #[test]
     fn test_build_tools_some() {
-        let req = Request {
-            messages: vec![],
-            tools: vec![ToolDefinition {
-                name: "get_weather".to_string(),
-                description: "Get weather".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "city": { "type": "string" }
-                    }
-                }),
-            }],
-        };
-        let tools = build_tools(&req).unwrap();
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].function.name, "get_weather");
+        let tools = vec![ToolDefinition {
+            name: "get_weather".to_string(),
+            description: "Get weather".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string" }
+                }
+            }),
+        }];
+        let api_tools = build_tools(&tools).unwrap();
+        assert_eq!(api_tools.len(), 1);
+        assert_eq!(api_tools[0].function.name, "get_weather");
     }
 
     #[test]
@@ -624,9 +576,10 @@ mod tests {
         };
         let provider = DeepSeekProvider::new(key);
         let model = test_model();
-        let req = simple_request("Reply with exactly: PONG");
+        let messages = simple_messages("Reply with exactly: PONG");
+        let tools: Vec<ToolDefinition> = vec![];
 
-        let stream = provider.stream(&model, &req).await.unwrap();
+        let stream = provider.stream(&model, &messages, &tools).await.unwrap();
         let responses = collect_stream(stream).await;
 
         assert!(!responses.is_empty(), "should receive at least one response");
@@ -641,10 +594,7 @@ mod tests {
             })
             .collect();
 
-        assert!(
-            combined_text.to_lowercase().contains("pong"),
-            "response should contain 'pong', got: {combined_text}"
-        );
+        assert!(combined_text.to_lowercase().contains("pong"), "response should contain 'pong', got: {combined_text}");
     }
 
     #[tokio::test]
@@ -655,9 +605,10 @@ mod tests {
         };
         let provider = DeepSeekProvider::new(key);
         let model = test_model();
-        let req = simple_request("Say hi in one word.");
+        let messages = simple_messages("Say hi in one word.");
+        let tools: Vec<ToolDefinition> = vec![];
 
-        let stream = provider.stream(&model, &req).await.unwrap();
+        let stream = provider.stream(&model, &messages, &tools).await.unwrap();
         let responses = collect_stream(stream).await;
 
         let has_usage = responses.iter().any(|r| r.usage.input_tokens > 0);
@@ -672,9 +623,10 @@ mod tests {
         };
         let provider = DeepSeekProvider::new(key);
         let model = test_model();
-        let req = simple_request("Say hello.");
+        let messages = simple_messages("Say hello.");
+        let tools: Vec<ToolDefinition> = vec![];
 
-        let stream = provider.stream(&model, &req).await.unwrap();
+        let stream = provider.stream(&model, &messages, &tools).await.unwrap();
         let responses = collect_stream(stream).await;
 
         let last = responses.last().expect("should have responses");
@@ -689,33 +641,30 @@ mod tests {
         };
         let provider = DeepSeekProvider::new(key);
         let model = test_model();
-        let req = Request {
-            messages: vec![Message {
-                role: "user".to_string(),
-                content: vec![ContentBlock::Text(TextContent {
-                    content: "What is the weather in Tokyo? Use the get_weather tool.".to_string(),
-                })],
-            }],
-            tools: vec![ToolDefinition {
-                name: "get_weather".to_string(),
-                description: "Get the current weather for a city".to_string(),
-                parameters: serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "city": { "type": "string", "description": "City name" }
-                    },
-                    "required": ["city"]
-                }),
-            }],
-        };
+        let messages = vec![Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text(TextContent {
+                content: "What is the weather in Tokyo? Use the get_weather tool.".to_string(),
+            })],
+        }];
+        let tools = vec![ToolDefinition {
+            name: "get_weather".to_string(),
+            description: "Get the current weather for a city".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string", "description": "City name" }
+                },
+                "required": ["city"]
+            }),
+        }];
 
         let stream: Pin<Box<dyn Stream<Item = StreamResponse> + Send>> =
-            provider.stream(&model, &req).await.unwrap();
+            provider.stream(&model, &messages, &tools).await.unwrap();
         let responses = collect_stream(stream).await;
 
-        let has_tool_call = responses
-            .iter()
-            .any(|r| r.message.content.iter().any(|b| matches!(b, ContentBlock::ToolCall { .. })));
+        let has_tool_call =
+            responses.iter().any(|r| r.message.content.iter().any(|b| matches!(b, ContentBlock::ToolCall { .. })));
         assert!(has_tool_call, "model should return a tool call");
     }
 
@@ -723,9 +672,10 @@ mod tests {
     async fn test_invalid_api_key() {
         let provider = DeepSeekProvider::new("sk-invalid-key-12345");
         let model = test_model();
-        let req = simple_request("Hi");
+        let messages = simple_messages("Hi");
+        let tools: Vec<ToolDefinition> = vec![];
 
-        let result = provider.stream(&model, &req).await;
+        let result = provider.stream(&model, &messages, &tools).await;
         assert!(result.is_err(), "invalid API key should return an error");
     }
 
@@ -743,9 +693,10 @@ mod tests {
             base_url: String::new(),
             headers: HashMap::new(),
         };
-        let req = simple_request("Hi");
+        let messages = simple_messages("Hi");
+        let tools: Vec<ToolDefinition> = vec![];
 
-        let result = provider.stream(&model, &req).await;
+        let result = provider.stream(&model, &messages, &tools).await;
         assert!(result.is_err(), "unknown model should return an error");
     }
 
@@ -774,15 +725,13 @@ mod tests {
         ) -> Result<crate::core::types::ToolResult, crate::core::tools::ToolError> {
             Ok(crate::core::types::ToolResult {
                 tool_call_id: String::new(),
-                content: vec![crate::core::types::ToolResultContent::Text(
-                    crate::core::types::TextContent {
-                        content: serde_json::json!({
-                            "city": "San Francisco",
-                            "country": "US"
-                        })
-                        .to_string(),
-                    },
-                )],
+                content: vec![crate::core::types::ToolResultContent::Text(crate::core::types::TextContent {
+                    content: serde_json::json!({
+                        "city": "San Francisco",
+                        "country": "US"
+                    })
+                    .to_string(),
+                })],
                 is_error: false,
             })
         }
@@ -814,16 +763,14 @@ mod tests {
         ) -> Result<crate::core::types::ToolResult, crate::core::tools::ToolError> {
             Ok(crate::core::types::ToolResult {
                 tool_call_id: String::new(),
-                content: vec![crate::core::types::ToolResultContent::Text(
-                    crate::core::types::TextContent {
-                        content: serde_json::json!({
-                            "temperature": "18°C",
-                            "condition": "Foggy",
-                            "humidity": "82%"
-                        })
-                        .to_string(),
-                    },
-                )],
+                content: vec![crate::core::types::ToolResultContent::Text(crate::core::types::TextContent {
+                    content: serde_json::json!({
+                        "temperature": "18°C",
+                        "condition": "Foggy",
+                        "humidity": "82%"
+                    })
+                    .to_string(),
+                })],
                 is_error: false,
             })
         }
@@ -846,38 +793,31 @@ mod tests {
         let model = test_model();
 
         let extension = Box::new(NoopExtension) as Box<dyn Extension>;
-        let agent_state = crate::core::agent::AgentState { model, tools, messages: vec![] };
-        let mut agent = crate::core::agent::Agent {
-            state: agent_state,
-            models: std::sync::Arc::new(registry),
-            extension,
+        let agent_state = crate::core::agent::AgentState {
+            model,
+            tools,
+            session: crate::core::session::InMemorySession::new().into(),
         };
+        let mut agent =
+            crate::core::agent::Agent { state: agent_state, models: std::sync::Arc::new(registry), extension };
 
         let user_msg = Message {
             role: "user".into(),
             content: vec![ContentBlock::Text(TextContent {
-                content: "What's the weather at my current location? Use the available tools to find out."
-                    .to_string(),
+                content: "What's the weather at my current location? Use the available tools to find out.".to_string(),
             })],
         };
 
         agent.prompt(user_msg).await.expect("agent run should succeed");
 
-        let output = agent.state.messages;
+        let output = agent.state.session.context().clone();
 
-        // The agent should produce at least 3 messages:
-        //   1) assistant with get_current_location tool call
-        //   2) tool result for get_current_location
-        //   3) assistant with get_weather_by_location tool call
-        //   4) tool result for get_weather_by_location
-        //   5) assistant with final text answer
         assert!(
             output.len() >= 3,
             "agent should produce multiple messages (tool calls + result), got {}",
             output.len()
         );
 
-        // Verify get_current_location was called
         let called_get_location = output.iter().any(|msg| {
             msg.content.iter().any(|b| {
                 matches!(
@@ -888,7 +828,6 @@ mod tests {
         });
         assert!(called_get_location, "agent should have called get_current_location");
 
-        // Verify get_weather_by_location was called
         let called_get_weather = output.iter().any(|msg| {
             msg.content.iter().any(|b| {
                 matches!(
@@ -899,12 +838,8 @@ mod tests {
         });
         assert!(called_get_weather, "agent should have called get_weather_by_location");
 
-        // Verify the final message is a text response from the assistant
         let last = output.last().expect("should have output");
         let has_text = last.content.iter().any(|b| matches!(b, ContentBlock::Text { .. }));
-        assert!(
-            has_text && last.role == "assistant",
-            "final message should be assistant text with weather info"
-        );
+        assert!(has_text && last.role == "assistant", "final message should be assistant text with weather info");
     }
 }

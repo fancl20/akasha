@@ -4,10 +4,9 @@ use crate::core::extensions::{Extension, ToolCallDecision};
 use std::sync::Arc;
 
 use crate::core::providers::{Model, Registry, StreamResponse};
+use crate::core::session::{Session, SessionError};
 use crate::core::tools::ToolRegistry;
-use crate::core::types::{
-    ContentBlock, Message, Request, TextContent, ToolResult, ToolResultContent,
-};
+use crate::core::types::{ContentBlock, Message, TextContent, ToolResult, ToolResultContent};
 
 /// Errors from agent operations.
 #[derive(Debug, thiserror::Error)]
@@ -18,6 +17,8 @@ pub enum AgentError {
     Tool(String),
     #[error("extension error: {0}")]
     Extension(#[from] crate::core::extensions::ExtensionError),
+    #[error("session error: {0}")]
+    Session(#[from] SessionError),
     #[error("agent aborted")]
     Aborted,
     #[error("{0}")]
@@ -28,7 +29,7 @@ pub enum AgentError {
 pub struct AgentState {
     pub model: Model,
     pub tools: ToolRegistry,
-    pub messages: Vec<Message>,
+    pub session: Box<dyn Session>,
 }
 
 pub struct Agent {
@@ -40,20 +41,14 @@ pub struct Agent {
 impl Agent {
     pub async fn prompt(&mut self, message: Message) -> Result<(), AgentError> {
         self.state = self.extension.on_agent_start(self.state.clone()).await?;
-        self.state.messages.push(message);
+        self.state.session.append(message)?;
         loop {
             let mut state = self.extension.on_turn_start(self.state.clone()).await?;
 
-            state.messages = agent_loop(
-                &Request { messages: state.messages.clone(), tools: state.tools.definitions() },
-                &state,
-                &self.models,
-                self.extension.as_mut(),
-            )
-            .await?;
+            state = agent_loop(state, &self.models, self.extension.as_mut()).await?;
 
             self.state = self.extension.on_turn_end(state).await?;
-            match self.state.messages.last() {
+            match self.state.session.context().last() {
                 Some(Message { role, .. }) if role == "assistant" => break,
                 _ => (),
             }
@@ -64,22 +59,19 @@ impl Agent {
 }
 
 pub async fn agent_loop(
-    request: &Request,
-    state: &AgentState,
+    mut state: AgentState,
     models: &Registry,
     extension: &mut dyn Extension,
-) -> Result<Vec<Message>, AgentError> {
-    let provider = models.get(&state.model.provider).ok_or_else(|| {
-        AgentError::Other(format!("no provider registered for '{}'", state.model.provider))
-    })?;
-
-    let mut request = Request { messages: request.messages.clone(), tools: request.tools.clone() };
+) -> Result<AgentState, AgentError> {
+    let provider = models
+        .get(&state.model.provider)
+        .ok_or_else(|| AgentError::Other(format!("no provider registered for '{}'", state.model.provider)))?;
 
     loop {
-        request = extension.on_message_start(request).await?;
+        state.session = extension.on_message_start(state.session).await?;
 
         let mut response = StreamResponse::new();
-        let mut stream = std::pin::pin!(provider.stream(&state.model, &request).await?);
+        let mut stream = provider.stream(&state.model, state.session.context(), &state.tools.definitions()).await?;
         while let Some(chunk) = stream.next().await {
             extension.on_message_update(&chunk).await?;
             response.merge(chunk);
@@ -87,40 +79,39 @@ pub async fn agent_loop(
         extension.on_message_end(&response).await?;
 
         let resp = response.message;
-        request.messages.push(resp.clone());
+        state.session.append(resp.clone())?;
 
         let tool_calls: Vec<(String, String, serde_json::Value)> = resp
             .content
             .iter()
             .filter_map(|b| match b {
-                ContentBlock::ToolCall(tc) => {
-                    Some((tc.id.clone(), tc.name.clone(), tc.arguments.clone()))
-                }
+                ContentBlock::ToolCall(tc) => Some((tc.id.clone(), tc.name.clone(), tc.arguments.clone())),
                 _ => None,
             })
             .collect();
 
         if tool_calls.len() == 0 {
-            return Ok(request.messages);
+            return Ok(state);
         }
 
         for (id, name, arguments) in tool_calls {
             let decision = extension.on_tool_execution_start(&id, &name, &arguments).await?;
             if let ToolCallDecision::Deny(reason) = decision {
-                request.messages.push(Message {
+                state.session.append(Message {
                     role: "tool".to_string(),
                     content: vec![ContentBlock::ToolResult(ToolResult {
                         tool_call_id: id,
                         content: vec![ToolResultContent::Text(TextContent { content: reason })],
                         is_error: true,
                     })],
-                });
+                })?;
                 continue;
             }
 
-            let handler = state.tools.get(&name).ok_or_else(|| {
-                AgentError::Tool(format!("no handler registered for tool '{name}'"))
-            })?;
+            let handler = state
+                .tools
+                .get(&name)
+                .ok_or_else(|| AgentError::Tool(format!("no handler registered for tool '{name}'")))?;
 
             let cancel = tokio::sync::watch::channel(false).1;
             let raw_result = handler.execute(cancel, arguments).await;
@@ -132,10 +123,9 @@ pub async fn agent_loop(
 
             result.tool_call_id = id;
 
-            request.messages.push(Message {
-                role: "tool".to_string(),
-                content: vec![ContentBlock::ToolResult(result)],
-            });
+            state
+                .session
+                .append(Message { role: "tool".to_string(), content: vec![ContentBlock::ToolResult(result)] })?;
         }
     }
 }

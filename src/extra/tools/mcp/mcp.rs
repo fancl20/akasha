@@ -50,8 +50,7 @@ impl ToolHandler for McpTool {
             req = req.with_arguments(args);
         }
 
-        let result =
-            self.peer.call_tool(req).await.map_err(|e| ToolError::Execution(e.to_string()))?;
+        let result = self.peer.call_tool(req).await.map_err(|e| ToolError::Execution(e.to_string()))?;
 
         let content = to_result_content(&result);
 
@@ -94,11 +93,7 @@ fn text_from_content(content: &[ToolResultContent]) -> String {
         })
         .collect();
 
-    if texts.is_empty() {
-        serde_json::to_string(content).unwrap_or_default()
-    } else {
-        texts.join("\n")
-    }
+    if texts.is_empty() { serde_json::to_string(content).unwrap_or_default() } else { texts.join("\n") }
 }
 
 /// Connects to an MCP server via streamable HTTP, discovers its tools, and
@@ -134,9 +129,8 @@ pub async fn register(
     for (key, value) in &server.headers {
         let name = reqwest::header::HeaderName::from_bytes(key.as_bytes())
             .map_err(|e| McpToolError::Connection(format!("invalid header name '{key}': {e}")))?;
-        let val = reqwest::header::HeaderValue::from_str(value).map_err(|e| {
-            McpToolError::Connection(format!("invalid header value for '{key}': {e}"))
-        })?;
+        let val = reqwest::header::HeaderValue::from_str(value)
+            .map_err(|e| McpToolError::Connection(format!("invalid header value for '{key}': {e}")))?;
         header_map.insert(name, val);
     }
 
@@ -145,14 +139,11 @@ pub async fn register(
         .build()
         .map_err(|e| McpToolError::Connection(e.to_string()))?;
 
-    let transport = StreamableHttpClientTransport::with_client(
-        client,
-        StreamableHttpClientTransportConfig::with_uri(&*server.url),
-    );
+    let transport =
+        StreamableHttpClientTransport::with_client(client, StreamableHttpClientTransportConfig::with_uri(&*server.url));
     let service = ().serve(transport).await.map_err(|e| McpToolError::Connection(e.to_string()))?;
     let service = Arc::new(service);
-    let tools =
-        service.list_all_tools().await.map_err(|e| McpToolError::Discovery(e.to_string()))?;
+    let tools = service.list_all_tools().await.map_err(|e| McpToolError::Discovery(e.to_string()))?;
 
     for tool in tools {
         let definition = ToolDefinition {
@@ -161,11 +152,7 @@ pub async fn register(
             parameters: serde_json::Value::Object(tool.input_schema.as_ref().clone()),
         };
 
-        registry.register(Box::new(McpTool {
-            definition,
-            peer: service.peer().clone(),
-            _connection: service.clone(),
-        }));
+        registry.register(Box::new(McpTool { definition, peer: service.peer().clone(), _connection: service.clone() }));
     }
 
     Ok(service)

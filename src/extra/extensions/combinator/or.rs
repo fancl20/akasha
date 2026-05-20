@@ -3,8 +3,9 @@ use async_trait::async_trait;
 use crate::core::agent::AgentState;
 use crate::core::extensions::{Extension, ExtensionError, ToolCallDecision};
 use crate::core::providers::StreamResponse;
+use crate::core::session::Session;
 use crate::core::tools::ToolError;
-use crate::core::types::{Request, ToolResult};
+use crate::core::types::ToolResult;
 
 /// Tries extension A first; if A fails, falls back to B.
 /// For state-transforming hooks, A is tried on the original state and,
@@ -55,10 +56,10 @@ impl Extension for Or {
         }
     }
 
-    async fn on_message_start(&mut self, req: Request) -> Result<Request, ExtensionError> {
-        match self.a.on_message_start(req.clone()).await {
-            Ok(r) => Ok(r),
-            Err(_) => self.b.on_message_start(req).await,
+    async fn on_message_start(&mut self, session: Box<dyn Session>) -> Result<Box<dyn Session>, ExtensionError> {
+        match self.a.on_message_start(session.fork()).await {
+            Ok(s) => Ok(s),
+            Err(_) => self.b.on_message_start(session).await,
         }
     }
 
@@ -84,9 +85,7 @@ impl Extension for Or {
     ) -> Result<ToolCallDecision, ExtensionError> {
         match self.a.on_tool_execution_start(tool_call_id, name, args).await? {
             ToolCallDecision::Allow => Ok(ToolCallDecision::Allow),
-            ToolCallDecision::Deny(_) => {
-                self.b.on_tool_execution_start(tool_call_id, name, args).await
-            }
+            ToolCallDecision::Deny(_) => self.b.on_tool_execution_start(tool_call_id, name, args).await,
         }
     }
 
@@ -119,58 +118,57 @@ mod tests {
     #[tokio::test]
     async fn test_or_first_succeeds() {
         let mut ext = Or::new(LabelExt::ok("a"), LabelExt::ok("b"));
-        let req = make_request("");
-        let result = ext.on_message_start(req).await.unwrap();
-        let text = match result.messages[0].content.last() {
-            Some(ContentBlock::Text(t)) => t.content.clone(),
+        let session = make_session("");
+        let result = ext.on_message_start(session).await.unwrap();
+        let ctx = result.context();
+        assert_eq!(ctx.len(), 1);
+        match &ctx[0].content[0] {
+            ContentBlock::Text(t) => assert_eq!(t.content, "a"),
             _ => panic!("expected text"),
-        };
-        assert_eq!(text, "a");
+        }
     }
 
     #[tokio::test]
     async fn test_or_fallback_on_failure() {
         let mut ext = Or::new(LabelExt::fail("a"), LabelExt::ok("b"));
-        let req = make_request("");
-        let result = ext.on_message_start(req).await.unwrap();
-        let text = match result.messages[0].content.last() {
-            Some(ContentBlock::Text(t)) => t.content.clone(),
+        let session = make_session("");
+        let result = ext.on_message_start(session).await.unwrap();
+        let ctx = result.context();
+        assert_eq!(ctx.len(), 1);
+        match &ctx[0].content[0] {
+            ContentBlock::Text(t) => assert_eq!(t.content, "b"),
             _ => panic!("expected text"),
-        };
-        assert_eq!(text, "b");
+        }
     }
 
     #[tokio::test]
     async fn test_or_both_fail() {
         let mut ext = Or::new(LabelExt::fail("a"), LabelExt::fail("b"));
-        let req = make_request("hello");
-        let err = ext.on_message_start(req).await.unwrap_err();
-        match err {
-            ExtensionError::ExtensionFailed { name, .. } => assert_eq!(name, "b"),
+        let session = make_session("hello");
+        match ext.on_message_start(session).await {
+            Err(ExtensionError::ExtensionFailed { name, .. }) => assert_eq!(name, "b"),
+            Ok(_) => panic!("expected error"),
         }
     }
 
     #[tokio::test]
     async fn test_or_tool_execution_first_allows() {
         let mut ext = Or::new(LabelExt::ok("a"), LabelExt::ok("b"));
-        let decision =
-            ext.on_tool_execution_start("", "tool", &serde_json::Value::Null).await.unwrap();
+        let decision = ext.on_tool_execution_start("", "tool", &serde_json::Value::Null).await.unwrap();
         assert!(matches!(decision, ToolCallDecision::Allow));
     }
 
     #[tokio::test]
     async fn test_or_tool_execution_first_denies_second_overrides() {
         let mut ext = Or::new(LabelExt::deny("a", "nope"), LabelExt::ok("b"));
-        let decision =
-            ext.on_tool_execution_start("", "tool", &serde_json::Value::Null).await.unwrap();
+        let decision = ext.on_tool_execution_start("", "tool", &serde_json::Value::Null).await.unwrap();
         assert!(matches!(decision, ToolCallDecision::Allow));
     }
 
     #[tokio::test]
     async fn test_or_tool_execution_both_deny() {
         let mut ext = Or::new(LabelExt::deny("a", "nope"), LabelExt::deny("b", "also nope"));
-        let decision =
-            ext.on_tool_execution_start("", "tool", &serde_json::Value::Null).await.unwrap();
+        let decision = ext.on_tool_execution_start("", "tool", &serde_json::Value::Null).await.unwrap();
         match decision {
             ToolCallDecision::Deny(r) => assert_eq!(r, "also nope"),
             ToolCallDecision::Allow => panic!("expected Deny"),

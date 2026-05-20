@@ -19,4 +19,7 @@ rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", features = [
     "transport-streamable-http-client-reqwest",
     "reqwest",
 ] }
+rusqlite = { version = "0.39.0", features = ["bundled"] }
+sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
+anyhow = "1.0.102"

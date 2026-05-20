@@ -40,7 +40,7 @@ pub enum ContentBlock {
     ToolResult(ToolResult),
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
     pub role: String,
     pub content: Vec<ContentBlock>,
@@ -53,12 +53,6 @@ pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     pub parameters: JsonSchema,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Request {
-    pub messages: Vec<Message>,
-    pub tools: Vec<ToolDefinition>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

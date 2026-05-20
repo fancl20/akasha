@@ -3,7 +3,8 @@ use async_trait::async_trait;
 use crate::core::agent::AgentState;
 use crate::core::extensions::{Extension, ExtensionError, ToolCallDecision};
 use crate::core::providers::StreamResponse;
-use crate::core::types::{ContentBlock, Message, Request, TextContent};
+use crate::core::session::{InMemorySession, Session};
+use crate::core::types::{ContentBlock, Message, TextContent};
 use std::sync::{Arc, Mutex};
 
 pub struct LabelExt {
@@ -24,12 +25,7 @@ impl LabelExt {
     }
 
     pub fn deny(label: &'static str, reason: &str) -> Self {
-        Self {
-            label,
-            should_fail: false,
-            deny_reason: Some(reason.to_string()),
-            calls: Arc::new(Mutex::new(vec![])),
-        }
+        Self { label, should_fail: false, deny_reason: Some(reason.to_string()), calls: Arc::new(Mutex::new(vec![])) }
     }
 
     fn record(&self, method: &'static str) {
@@ -43,31 +39,23 @@ impl Extension for LabelExt {
         self.label
     }
 
-    async fn on_message_start(&mut self, mut req: Request) -> Result<Request, ExtensionError> {
+    async fn on_message_start(&mut self, mut session: Box<dyn Session>) -> Result<Box<dyn Session>, ExtensionError> {
         if self.should_fail {
-            return Err(ExtensionError::ExtensionFailed {
-                name: self.label.to_string(),
-                message: "fail".into(),
-            });
+            return Err(ExtensionError::ExtensionFailed { name: self.label.to_string(), message: "fail".into() });
         }
-        if let Some(ContentBlock::Text(t)) =
-            req.messages.last_mut().and_then(|m| m.content.last_mut())
-        {
-            if !t.content.is_empty() {
-                t.content.push(',');
-            }
-            t.content.push_str(self.label);
-        }
-        Ok(req)
+        session
+            .append(Message {
+                role: "system".into(),
+                content: vec![ContentBlock::Text(TextContent { content: self.label.to_string() })],
+            })
+            .unwrap();
+        Ok(session)
     }
 
     async fn on_agent_start(&mut self, state: AgentState) -> Result<AgentState, ExtensionError> {
         self.record("on_agent_start");
         if self.should_fail {
-            return Err(ExtensionError::ExtensionFailed {
-                name: self.label.to_string(),
-                message: "fail".into(),
-            });
+            return Err(ExtensionError::ExtensionFailed { name: self.label.to_string(), message: "fail".into() });
         }
         Ok(state)
     }
@@ -89,10 +77,7 @@ impl Extension for LabelExt {
     async fn on_message_update(&mut self, _resp: &StreamResponse) -> Result<(), ExtensionError> {
         self.record("on_message_update");
         if self.should_fail {
-            return Err(ExtensionError::ExtensionFailed {
-                name: self.label.to_string(),
-                message: "fail".into(),
-            });
+            return Err(ExtensionError::ExtensionFailed { name: self.label.to_string(), message: "fail".into() });
         }
         Ok(())
     }
@@ -103,14 +88,17 @@ impl Extension for LabelExt {
     }
 }
 
-pub fn make_request(text: &str) -> Request {
-    Request {
-        messages: vec![Message {
-            role: "user".into(),
-            content: vec![ContentBlock::Text(TextContent { content: text.into() })],
-        }],
-        tools: vec![],
+pub fn make_session(text: &str) -> Box<dyn Session> {
+    let mut session = InMemorySession::new();
+    if !text.is_empty() {
+        session
+            .append(Message {
+                role: "user".into(),
+                content: vec![ContentBlock::Text(TextContent { content: text.to_string() })],
+            })
+            .unwrap();
     }
+    session.into()
 }
 
 pub fn make_response() -> StreamResponse {

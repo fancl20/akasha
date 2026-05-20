@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::pin::Pin;
 
-use crate::core::types::{ContentBlock, Message, Request, TokenUsage};
+use crate::core::types::{ContentBlock, Message, TokenUsage, ToolDefinition};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Model {
@@ -41,12 +41,7 @@ impl StreamResponse {
     pub fn new() -> Self {
         Self {
             message: Message { role: "assistant".to_string(), content: Vec::new() },
-            usage: TokenUsage {
-                input_tokens: 0,
-                output_tokens: 0,
-                cache_read_tokens: None,
-                cache_write_tokens: None,
-            },
+            usage: TokenUsage { input_tokens: 0, output_tokens: 0, cache_read_tokens: None, cache_write_tokens: None },
             stop_reason: None,
         }
     }
@@ -66,8 +61,7 @@ impl StreamResponse {
                     }
                 }
                 ContentBlock::Reasoning(t) => {
-                    if let Some(ContentBlock::Reasoning(existing)) = self.message.content.last_mut()
-                    {
+                    if let Some(ContentBlock::Reasoning(existing)) = self.message.content.last_mut() {
                         existing.content.push_str(&t.content);
                     } else {
                         self.message.content.push(ContentBlock::Reasoning(t));
@@ -92,7 +86,8 @@ pub trait Provider: Send + Sync {
     async fn stream(
         &self,
         model: &Model,
-        request: &Request,
+        messages: &Vec<Message>,
+        tools: &Vec<ToolDefinition>,
     ) -> Result<StreamResponseStream, ProviderError>;
 
     fn name(&self) -> &str;
