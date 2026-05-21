@@ -58,7 +58,7 @@ impl ToolHandler for McpTool {
             let text = text_from_content(&content);
             Err(ToolError::Execution(text))
         } else {
-            Ok(ToolResult { tool_call_id: String::new(), content, is_error: false })
+            Ok(ToolResult { tool_call_id: None, content, is_error: false })
         }
     }
 }

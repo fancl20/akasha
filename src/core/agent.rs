@@ -100,7 +100,7 @@ pub async fn agent_loop(
                 state.session.append(Message {
                     role: "tool".to_string(),
                     content: vec![ContentBlock::ToolResult(ToolResult {
-                        tool_call_id: id,
+                        tool_call_id: Some(id),
                         content: vec![ToolResultContent::Text(TextContent { content: reason })],
                         is_error: true,
                     })],
@@ -121,7 +121,7 @@ pub async fn agent_loop(
                 .await?
                 .map_err(|e| AgentError::Tool(format!("tool '{name}' execution failed: {e}")))?;
 
-            result.tool_call_id = id;
+            result.tool_call_id = Some(id);
 
             state
                 .session

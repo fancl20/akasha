@@ -39,7 +39,7 @@ enum ApiMessage {
         tool_calls: Option<Vec<ApiToolCall>>,
     },
     #[serde(rename = "tool")]
-    Tool { content: String, tool_call_id: String },
+    Tool { content: String, tool_call_id: Option<String> },
 }
 
 #[derive(Serialize)]
@@ -513,7 +513,7 @@ mod tests {
             Message {
                 role: "tool".to_string(),
                 content: vec![ContentBlock::ToolResult(ToolResult {
-                    tool_call_id: "call_1".to_string(),
+                    tool_call_id: Some("call_1".to_string()),
                     content: vec![ToolResultContent::Text(TextContent { content: "Sunny, 22C".to_string() })],
                     is_error: false,
                 })],
@@ -724,7 +724,7 @@ mod tests {
             _params: serde_json::Value,
         ) -> Result<crate::core::types::ToolResult, crate::core::tools::ToolError> {
             Ok(crate::core::types::ToolResult {
-                tool_call_id: String::new(),
+                tool_call_id: None,
                 content: vec![crate::core::types::ToolResultContent::Text(crate::core::types::TextContent {
                     content: serde_json::json!({
                         "city": "San Francisco",
@@ -762,7 +762,7 @@ mod tests {
             _params: serde_json::Value,
         ) -> Result<crate::core::types::ToolResult, crate::core::tools::ToolError> {
             Ok(crate::core::types::ToolResult {
-                tool_call_id: String::new(),
+                tool_call_id: None,
                 content: vec![crate::core::types::ToolResultContent::Text(crate::core::types::TextContent {
                     content: serde_json::json!({
                         "temperature": "18°C",

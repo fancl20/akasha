@@ -26,7 +26,7 @@ pub struct ToolCall {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolResult {
-    pub tool_call_id: String,
+    pub tool_call_id: Option<String>,
     pub content: Vec<ToolResultContent>,
     pub is_error: bool,
 }
