@@ -93,15 +93,17 @@ async fn main() {
         cli.telegram_token,
         allowed_ids,
         Arc::new(move |user| {
+            let mut tools = tools.clone();
             let mut session: Box<dyn Session> = match user {
                 Some(user) => {
                     let dir = data_dir().join("db");
                     let _ = std::fs::create_dir_all(&dir);
                     SqliteSession::new(
                         dir.join(format!("{}.db", user.id.0)).to_str().ok_or(anyhow::anyhow!("invalid db path"))?,
-                        "telegram",
+                        &uuid::Uuid::now_v7().to_string(),
                     )
-                    .map_err(|e| anyhow::anyhow!(e))?
+                    .map_err(|e| anyhow::anyhow!(e))
+                    .inspect(|session| session.register_tools(&mut tools))?
                     .into()
                 }
                 None => InMemorySession::new().into(),

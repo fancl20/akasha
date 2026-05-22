@@ -25,6 +25,12 @@ pub trait ToolHandler: Send + Sync {
     ) -> Result<ToolResult, ToolError>;
 }
 
+impl<T: ToolHandler + 'static> From<T> for Box<dyn ToolHandler> {
+    fn from(tool: T) -> Self {
+        Box::new(tool)
+    }
+}
+
 #[derive(Clone)]
 pub struct ToolRegistry {
     tools: HashMap<String, Arc<dyn ToolHandler>>,

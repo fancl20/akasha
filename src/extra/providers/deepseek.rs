@@ -446,7 +446,7 @@ impl Provider for DeepSeekProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::core::extensions::{Extension, NoopExtension};
+    use crate::core::extensions::NoopExtension;
     use crate::core::providers::{Model, Provider, Registry};
     use crate::core::tools::{ToolHandler, ToolRegistry};
     use crate::core::types::{ContentBlock, Message, TextContent, ToolDefinition, ToolResult, ToolResultContent};
@@ -787,19 +787,21 @@ mod tests {
         registry.register("deepseek", Box::new(DeepSeekProvider::new(key)));
 
         let mut tools = ToolRegistry::new();
-        tools.register(Box::new(GetCurrentLocationTool));
-        tools.register(Box::new(GetWeatherByLocationTool));
+        tools.register(GetCurrentLocationTool.into());
+        tools.register(GetWeatherByLocationTool.into());
 
         let model = test_model();
 
-        let extension = Box::new(NoopExtension) as Box<dyn Extension>;
         let agent_state = crate::core::agent::AgentState {
             model,
             tools,
             session: crate::core::session::InMemorySession::new().into(),
         };
-        let mut agent =
-            crate::core::agent::Agent { state: agent_state, models: std::sync::Arc::new(registry), extension };
+        let mut agent = crate::core::agent::Agent {
+            state: agent_state,
+            models: std::sync::Arc::new(registry),
+            extension: NoopExtension.into(),
+        };
 
         let user_msg = Message {
             role: "user".into(),

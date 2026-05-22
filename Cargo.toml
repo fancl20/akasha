@@ -20,7 +20,8 @@ rmcp = { git = "https://github.com/modelcontextprotocol/rust-sdk", features = [
     "reqwest",
 ] }
 rusqlite = { version = "0.39.0", features = ["bundled"] }
+schemars = "1"
 sha2 = "0.10"
 tokio = { version = "1", features = ["full"] }
 anyhow = "1.0.102"
-schemars = "1"
+uuid = { version = "1", features = ["v7"] }

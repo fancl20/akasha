@@ -43,6 +43,10 @@ impl SqliteSession {
 
         Ok(Self { db: Arc::new(Mutex::new(conn)), ref_name: ref_name.to_string(), head_id, messages })
     }
+
+    pub fn db(&self) -> Arc<Mutex<Connection>> {
+        self.db.clone()
+    }
 }
 
 impl Session for SqliteSession {

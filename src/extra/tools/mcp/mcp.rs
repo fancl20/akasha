@@ -152,7 +152,7 @@ pub async fn register(
             parameters: serde_json::Value::Object(tool.input_schema.as_ref().clone()),
         };
 
-        registry.register(Box::new(McpTool { definition, peer: service.peer().clone(), _connection: service.clone() }));
+        registry.register(McpTool { definition, peer: service.peer().clone(), _connection: service.clone() }.into());
     }
 
     Ok(service)
