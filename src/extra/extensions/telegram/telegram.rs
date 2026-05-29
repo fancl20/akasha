@@ -95,7 +95,7 @@ async fn update_chat(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<
         (_, "") => id,
         (Some(id), sending) => {
             match bot.edit_message_text(chat_id, id, sending).disable_link_preview(true).await {
-                Ok(_) | Err(RequestError::Api(ApiError::MessageNotModified)) => (),
+                Ok(_) | Err(RequestError::Api(ApiError::MessageNotModified)) => {}
                 Err(e) => eprintln!("telegram edit error: {e}"),
             };
             Some(id)
@@ -119,7 +119,7 @@ async fn update_chat(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<
         let mut finish_tx = None;
         match event {
             Some(StreamEvent::Append(ContentBlock::Text(t))) => pending.push_str(&t.content),
-            Some(StreamEvent::Append(ContentBlock::Reasoning { .. })) => (), // Allow reasoning event to trigger typing action.
+            Some(StreamEvent::Append(ContentBlock::Reasoning { .. })) => {} // Allow reasoning event to trigger typing action.
             Some(StreamEvent::Append(..)) => continue,
             Some(StreamEvent::Notification(t)) if pending.is_empty() => {
                 message_id = update_message(message_id, &t[..t.ceil_char_boundary(512)]).await

@@ -1,3 +1,1 @@
-mod session;
-
-pub use session::MuxSession;
+pub mod session;

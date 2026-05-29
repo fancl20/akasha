@@ -50,7 +50,7 @@ impl Agent {
             self.state = self.extension.on_turn_end(state).await?;
             match self.state.session.lock().unwrap().messages().last() {
                 Some(Message { role, .. }) if role == "assistant" => break,
-                _ => (),
+                _ => {}
             }
         }
         self.state = self.extension.on_agent_end(self.state.clone()).await?;
@@ -68,7 +68,7 @@ pub async fn agent_loop(
         .ok_or_else(|| AgentError::Other(format!("no provider registered for '{}'", state.model.provider)))?;
 
     loop {
-        let messages = state.session.lock().unwrap().messages().clone();
+        let messages = state.session.lock().unwrap().messages().cloned().collect();
         let messages = extension.on_message_start(messages).await?;
 
         let mut response = StreamResponse::new();

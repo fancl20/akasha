@@ -48,8 +48,8 @@ impl SqliteSession {
 }
 
 impl Session for SqliteSession {
-    fn messages(&self) -> &Vec<Message> {
-        &self.messages
+    fn messages(&self) -> Box<dyn Iterator<Item = &Message> + '_> {
+        Box::new(self.messages.iter())
     }
 
     fn append(&mut self, message: Message) -> Result<(), SessionError> {
@@ -98,7 +98,7 @@ mod tests {
     #[test]
     fn empty_session() {
         let s = make_session("test");
-        assert!(s.messages().is_empty());
+        assert!(s.messages().next().is_none());
     }
 
     #[test]
@@ -107,7 +107,7 @@ mod tests {
         s.append(text_msg("user", "hello")).unwrap();
         s.append(text_msg("assistant", "hi")).unwrap();
         s.append(text_msg("user", "how are you")).unwrap();
-        let ctx = s.messages();
+        let ctx: Vec<_> = s.messages().collect();
         assert_eq!(ctx.len(), 3);
         assert_eq!(ctx[0].role, "user");
         assert_eq!(ctx[1].role, "assistant");
@@ -125,7 +125,7 @@ mod tests {
         drop(s);
 
         let loaded = SqliteSession::new(path, "conv1").unwrap();
-        let ctx = loaded.messages();
+        let ctx: Vec<_> = loaded.messages().collect();
         assert_eq!(ctx.len(), 2);
         assert_eq!(ctx[0].role, "user");
         assert_eq!(ctx[1].role, "assistant");

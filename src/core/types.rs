@@ -15,7 +15,6 @@ pub struct ImageContetnt {
 pub enum ToolResultContent {
     Text(TextContent),
     Image(ImageContetnt),
-    Custom { tool_type: String, content: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

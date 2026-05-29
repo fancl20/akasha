@@ -814,7 +814,7 @@ mod tests {
 
         agent.prompt(user_msg).await.expect("agent run should succeed");
 
-        let output = agent.state.session.lock().unwrap().messages().clone();
+        let output: Vec<_> = agent.state.session.lock().unwrap().messages().cloned().collect();
 
         assert!(
             output.len() >= 3,
