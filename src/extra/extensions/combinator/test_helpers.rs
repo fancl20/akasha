@@ -3,7 +3,6 @@ use async_trait::async_trait;
 use crate::core::agent::AgentState;
 use crate::core::extensions::{Extension, ExtensionError, ToolCallDecision};
 use crate::core::providers::StreamResponse;
-use crate::core::session::{InMemorySession, Session};
 use crate::core::types::{ContentBlock, Message, TextContent};
 use std::sync::{Arc, Mutex};
 
@@ -39,17 +38,15 @@ impl Extension for LabelExt {
         self.label
     }
 
-    async fn on_message_start(&mut self, mut session: Box<dyn Session>) -> Result<Box<dyn Session>, ExtensionError> {
+    async fn on_message_start(&mut self, mut messages: Vec<Message>) -> Result<Vec<Message>, ExtensionError> {
         if self.should_fail {
             return Err(ExtensionError::ExtensionFailed { name: self.label.to_string(), message: "fail".into() });
         }
-        session
-            .append(Message {
-                role: "system".into(),
-                content: vec![ContentBlock::Text(TextContent { content: self.label.to_string() })],
-            })
-            .unwrap();
-        Ok(session)
+        messages.push(Message {
+            role: "system".into(),
+            content: vec![ContentBlock::Text(TextContent { content: self.label.to_string() })],
+        });
+        Ok(messages)
     }
 
     async fn on_agent_start(&mut self, state: AgentState) -> Result<AgentState, ExtensionError> {
@@ -88,17 +85,15 @@ impl Extension for LabelExt {
     }
 }
 
-pub fn make_session(text: &str) -> Box<dyn Session> {
-    let mut session = InMemorySession::new();
-    if !text.is_empty() {
-        session
-            .append(Message {
-                role: "user".into(),
-                content: vec![ContentBlock::Text(TextContent { content: text.to_string() })],
-            })
-            .unwrap();
+pub fn make_session(text: &str) -> Vec<Message> {
+    if text.is_empty() {
+        vec![]
+    } else {
+        vec![Message {
+            role: "user".into(),
+            content: vec![ContentBlock::Text(TextContent { content: text.to_string() })],
+        }]
     }
-    session.into()
 }
 
 pub fn make_response() -> StreamResponse {

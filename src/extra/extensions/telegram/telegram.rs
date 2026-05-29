@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 use teloxide::dispatching::dialogue::{Dialogue, InMemStorage};
 use teloxide::dispatching::{Dispatcher, UpdateFilterExt, UpdateHandler, dialogue};
@@ -9,7 +9,7 @@ use teloxide::sugar::request::RequestLinkPreviewExt;
 use teloxide::types::{ChatAction, ChatId, Message as TgMessage, MessageId, Update, User};
 use teloxide::utils::command::BotCommands;
 use teloxide::{ApiError, Bot, RequestError, dptree};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tokio::task::JoinSet;
 
 use crate::core::agent::{Agent, AgentState};
@@ -59,7 +59,7 @@ impl Extension for TelegramExtension {
         Ok(ToolCallDecision::Allow)
     }
 
-    async fn on_turn_end(&mut self, mut state: AgentState) -> Result<AgentState, ExtensionError> {
+    async fn on_turn_end(&mut self, state: AgentState) -> Result<AgentState, ExtensionError> {
         let (tx, rx) = oneshot::channel();
         self.tx.send(StreamEvent::Finish(tx)).map_err(|_| ExtensionError::ExtensionFailed {
             name: "telegram".to_string(),
@@ -70,12 +70,15 @@ impl Extension for TelegramExtension {
             message: "updater task dropped".to_string(),
         })?;
 
+        let msg = self.rx.recv().await.ok_or(ExtensionError::ExtensionFailed {
+            name: "telegram".to_string(),
+            message: "input channel dropped".to_string(),
+        })?;
         state
             .session
-            .append(self.rx.recv().await.ok_or(ExtensionError::ExtensionFailed {
-                name: "telegram".to_string(),
-                message: "input channel dropped".to_string(),
-            })?)
+            .lock()
+            .unwrap()
+            .append(msg)
             .map_err(|e| ExtensionError::ExtensionFailed { name: "telegram".to_string(), message: e.to_string() })?;
         Ok(state)
     }
@@ -193,7 +196,7 @@ async fn command_handler(bot: Bot, dialogue: AgentDialogue, msg: TgMessage, cmd:
     match cmd {
         Command::Reset => {
             if let Ok(State::Running { tasks, .. }) = dialogue.get_or_default().await {
-                tasks.lock().expect("tasks lock poisoned").abort_all();
+                tasks.lock().await.abort_all();
             }
             dialogue.exit().await?;
             bot.send_message(msg.chat.id, "agent aborted and reset.").await?;

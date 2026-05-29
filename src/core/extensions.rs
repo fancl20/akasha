@@ -2,9 +2,8 @@ use async_trait::async_trait;
 
 use crate::core::agent::AgentState;
 use crate::core::providers::StreamResponse;
-use crate::core::session::Session;
 use crate::core::tools::ToolError;
-use crate::core::types::ToolResult;
+use crate::core::types::{Message, ToolResult};
 
 pub enum ToolCallDecision {
     Allow,
@@ -37,8 +36,8 @@ pub trait Extension: Send + 'static {
         Ok(_state)
     }
 
-    async fn on_message_start(&mut self, _session: Box<dyn Session>) -> Result<Box<dyn Session>, ExtensionError> {
-        Ok(_session)
+    async fn on_message_start(&mut self, _messages: Vec<Message>) -> Result<Vec<Message>, ExtensionError> {
+        Ok(_messages)
     }
 
     async fn on_message_update(&mut self, _resp: &StreamResponse) -> Result<(), ExtensionError> {

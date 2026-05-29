@@ -3,9 +3,8 @@ use async_trait::async_trait;
 use crate::core::agent::AgentState;
 use crate::core::extensions::{Extension, ExtensionError, ToolCallDecision};
 use crate::core::providers::StreamResponse;
-use crate::core::session::Session;
 use crate::core::tools::ToolError;
-use crate::core::types::ToolResult;
+use crate::core::types::{Message, ToolResult};
 
 /// Tries extension A first; if A fails, falls back to B.
 /// For state-transforming hooks, A is tried on the original state and,
@@ -56,10 +55,10 @@ impl Extension for Or {
         }
     }
 
-    async fn on_message_start(&mut self, session: Box<dyn Session>) -> Result<Box<dyn Session>, ExtensionError> {
-        match self.a.on_message_start(session.fork()).await {
-            Ok(s) => Ok(s),
-            Err(_) => self.b.on_message_start(session).await,
+    async fn on_message_start(&mut self, messages: Vec<Message>) -> Result<Vec<Message>, ExtensionError> {
+        match self.a.on_message_start(messages.clone()).await {
+            Ok(m) => Ok(m),
+            Err(_) => self.b.on_message_start(messages).await,
         }
     }
 
@@ -118,11 +117,10 @@ mod tests {
     #[tokio::test]
     async fn test_or_first_succeeds() {
         let mut ext = Or::new(LabelExt::ok("a"), LabelExt::ok("b"));
-        let session = make_session("");
-        let result = ext.on_message_start(session).await.unwrap();
-        let ctx = result.context();
-        assert_eq!(ctx.len(), 1);
-        match &ctx[0].content[0] {
+        let messages = make_session("");
+        let result = ext.on_message_start(messages).await.unwrap();
+        assert_eq!(result.len(), 1);
+        match &result[0].content[0] {
             ContentBlock::Text(t) => assert_eq!(t.content, "a"),
             _ => panic!("expected text"),
         }
@@ -131,11 +129,10 @@ mod tests {
     #[tokio::test]
     async fn test_or_fallback_on_failure() {
         let mut ext = Or::new(LabelExt::fail("a"), LabelExt::ok("b"));
-        let session = make_session("");
-        let result = ext.on_message_start(session).await.unwrap();
-        let ctx = result.context();
-        assert_eq!(ctx.len(), 1);
-        match &ctx[0].content[0] {
+        let messages = make_session("");
+        let result = ext.on_message_start(messages).await.unwrap();
+        assert_eq!(result.len(), 1);
+        match &result[0].content[0] {
             ContentBlock::Text(t) => assert_eq!(t.content, "b"),
             _ => panic!("expected text"),
         }
@@ -144,8 +141,8 @@ mod tests {
     #[tokio::test]
     async fn test_or_both_fail() {
         let mut ext = Or::new(LabelExt::fail("a"), LabelExt::fail("b"));
-        let session = make_session("hello");
-        match ext.on_message_start(session).await {
+        let messages = make_session("hello");
+        match ext.on_message_start(messages).await {
             Err(ExtensionError::ExtensionFailed { name, .. }) => assert_eq!(name, "b"),
             Ok(_) => panic!("expected error"),
         }

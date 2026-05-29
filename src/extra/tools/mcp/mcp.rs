@@ -40,7 +40,7 @@ impl ToolHandler for McpTool {
 
     async fn execute(
         &self,
-        _cancel: tokio::sync::watch::Receiver<bool>,
+        _cancel: futures::channel::oneshot::Receiver<bool>,
         params: serde_json::Value,
     ) -> Result<ToolResult, ToolError> {
         let arguments = params.as_object().cloned();

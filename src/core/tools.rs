@@ -1,6 +1,7 @@
-use async_trait::async_trait;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+use async_trait::async_trait;
 
 use crate::core::types::{ToolDefinition, ToolResult};
 
@@ -20,7 +21,7 @@ pub trait ToolHandler: Send + Sync {
 
     async fn execute(
         &self,
-        cancel: tokio::sync::watch::Receiver<bool>,
+        cancel: futures::channel::oneshot::Receiver<bool>,
         params: serde_json::Value,
     ) -> Result<ToolResult, ToolError>;
 }

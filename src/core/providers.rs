@@ -1,8 +1,9 @@
+use std::collections::HashMap;
+use std::pin::Pin;
+
 use async_trait::async_trait;
 use futures::Stream;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::pin::Pin;
 
 use crate::core::types::{ContentBlock, Message, TokenUsage, ToolDefinition};
 

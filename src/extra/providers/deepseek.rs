@@ -445,9 +445,11 @@ impl Provider for DeepSeekProvider {
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
     use crate::core::extensions::NoopExtension;
     use crate::core::providers::{Model, Provider, Registry};
+    use crate::core::session::Session;
     use crate::core::tools::{ToolHandler, ToolRegistry};
     use crate::core::types::{ContentBlock, Message, TextContent, ToolDefinition, ToolResult, ToolResultContent};
     use futures::StreamExt;
@@ -720,7 +722,7 @@ mod tests {
 
         async fn execute(
             &self,
-            _cancel: tokio::sync::watch::Receiver<bool>,
+            _cancel: futures::channel::oneshot::Receiver<bool>,
             _params: serde_json::Value,
         ) -> Result<crate::core::types::ToolResult, crate::core::tools::ToolError> {
             Ok(crate::core::types::ToolResult {
@@ -758,7 +760,7 @@ mod tests {
 
         async fn execute(
             &self,
-            _cancel: tokio::sync::watch::Receiver<bool>,
+            _cancel: futures::channel::oneshot::Receiver<bool>,
             _params: serde_json::Value,
         ) -> Result<crate::core::types::ToolResult, crate::core::tools::ToolError> {
             Ok(crate::core::types::ToolResult {
@@ -795,7 +797,7 @@ mod tests {
         let agent_state = crate::core::agent::AgentState {
             model,
             tools,
-            session: crate::core::session::InMemorySession::new().into(),
+            session: crate::core::session::InMemorySession::new().arc(),
         };
         let mut agent = crate::core::agent::Agent {
             state: agent_state,
@@ -812,7 +814,7 @@ mod tests {
 
         agent.prompt(user_msg).await.expect("agent run should succeed");
 
-        let output = agent.state.session.context().clone();
+        let output = agent.state.session.lock().unwrap().messages().clone();
 
         assert!(
             output.len() >= 3,

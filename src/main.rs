@@ -10,7 +10,6 @@ use akasha::core::tools::ToolRegistry;
 use akasha::core::types::{ContentBlock, Message, TextContent};
 use akasha::extra::extensions::telegram;
 use akasha::extra::providers::deepseek::DeepSeekProvider;
-use akasha::extra::sessions::sqlite::SqliteSession;
 use akasha::extra::tools::mcp;
 use clap::Parser;
 
@@ -94,21 +93,21 @@ async fn main() {
         allowed_ids,
         Arc::new(move |user| {
             let mut tools = tools.clone();
-            let mut session: Box<dyn Session> = match user {
+            let session = match user {
                 Some(user) => {
-                    let dir = data_dir().join("db");
-                    let _ = std::fs::create_dir_all(&dir);
-                    SqliteSession::new(
-                        dir.join(format!("{}.db", user.id.0)).to_str().ok_or(anyhow::anyhow!("invalid db path"))?,
-                        &uuid::Uuid::now_v7().to_string(),
-                    )
-                    .map_err(|e| anyhow::anyhow!(e))
-                    .inspect(|session| session.register_tools(&mut tools))?
-                    .into()
+                    // let dir = data_dir().join("db");
+                    // let _ = std::fs::create_dir_all(&dir);
+                    // SqliteSession::new(
+                    //     dir.join(format!("{}.db", user.id.0)).to_str().ok_or(anyhow::anyhow!("invalid db path"))?,
+                    //     &uuid::Uuid::now_v7().to_string(),
+                    // )
+                    // .map_err(|e| anyhow::anyhow!(e))
+                    // .inspect(|session| session.register_tools(&mut tools))?
+                    InMemorySession::new().arc()
                 }
-                None => InMemorySession::new().into(),
+                None => InMemorySession::new().arc(),
             };
-            session.append(prompt.clone()).map_err(|e| anyhow::anyhow!(e))?;
+            session.lock().unwrap().append(prompt.clone()).map_err(|e| anyhow::anyhow!(e))?;
 
             Ok(Agent {
                 state: AgentState { model: model.clone(), tools: tools.clone(), session },
