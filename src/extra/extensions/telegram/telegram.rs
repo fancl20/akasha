@@ -190,10 +190,13 @@ enum Command {
     Reset,
     #[command(description = "show available commands")]
     Help,
+    #[command(description = "start talk with the agent")]
+    Start,
 }
 
 async fn command_handler(bot: Bot, dialogue: AgentDialogue, msg: TgMessage, cmd: Command) -> HandlerResult {
     match cmd {
+        Command::Start => {}
         Command::Reset => {
             if let Ok(State::Running { tasks, .. }) = dialogue.get_or_default().await {
                 tasks.lock().await.abort_all();
@@ -250,6 +253,7 @@ fn schema(ids: Arc<HashSet<u64>>) -> UpdateHandler<Box<dyn std::error::Error + S
     let allowed_filter = move |msg: TgMessage| msg.from.map(|user| ids.contains(&user.id.0)).unwrap_or_default();
 
     let command_handler = teloxide::filter_command::<Command, _>()
+        .branch(dptree::case![Command::Start].endpoint(command_handler))
         .branch(dptree::case![Command::Help].endpoint(command_handler))
         .branch(dptree::case![Command::Reset].endpoint(command_handler));
 

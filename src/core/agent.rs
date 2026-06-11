@@ -109,20 +109,37 @@ pub async fn agent_loop(
                 continue;
             }
 
-            let handler = state
-                .tools
-                .get(&name)
-                .ok_or_else(|| AgentError::Tool(format!("no handler registered for tool '{name}'")))?;
+            let Some(handler) = state.tools.get(&name) else {
+                state.session.lock().unwrap().append(Message {
+                    role: "tool".to_string(),
+                    content: vec![ContentBlock::ToolResult(ToolResult {
+                        tool_call_id: Some(id),
+                        content: vec![ToolResultContent::Text(TextContent {
+                            content: format!("error: no handler registered for tool '{name}'"),
+                        })],
+                        is_error: true,
+                    })],
+                })?;
+                continue;
+            };
 
             let (_, rx) = futures::channel::oneshot::channel();
             let raw_result = handler.execute(rx, arguments).await;
 
-            let mut result = extension
-                .tool_execution_end(&id, raw_result)
-                .await?
-                .map_err(|e| AgentError::Tool(format!("tool '{name}' execution failed: {e}")))?;
-
-            result.tool_call_id = Some(id);
+            let result = extension.tool_execution_end(&id, raw_result).await?;
+            let result = match result {
+                Ok(mut r) => {
+                    r.tool_call_id = Some(id);
+                    r
+                }
+                Err(e) => ToolResult {
+                    tool_call_id: Some(id),
+                    content: vec![ToolResultContent::Text(TextContent {
+                        content: format!("error: tool '{name}' execution failed: {e}"),
+                    })],
+                    is_error: true,
+                },
+            };
 
             let tool_msg = Message { role: "tool".to_string(), content: vec![ContentBlock::ToolResult(result)] };
             state.session.lock().unwrap().append(tool_msg)?;

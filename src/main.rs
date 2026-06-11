@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use akasha::core::agent::{Agent, AgentState};
 use akasha::core::extensions::NoopExtension;
@@ -10,6 +10,7 @@ use akasha::core::tools::ToolRegistry;
 use akasha::core::types::{ContentBlock, Message, TextContent};
 use akasha::extra::extensions::telegram;
 use akasha::extra::providers::deepseek::DeepSeekProvider;
+use akasha::extra::sessions::mux::session::MuxSession;
 use akasha::extra::sessions::sqlite::SqliteSession;
 use akasha::extra::tools::mcp;
 use clap::Parser;
@@ -58,7 +59,7 @@ async fn main() {
     models.register("deepseek", Box::new(DeepSeekProvider::new(api_key)));
 
     let model = Model {
-        id: "deepseek-v4-flash".into(),
+        id: "deepseek-v4-pro".into(),
         provider: provider,
         context_window: 384_000,
         base_url: base_url.unwrap_or_default(),
@@ -84,34 +85,44 @@ async fn main() {
 
     let prompt = Message {
         role: "user".into(),
-        content: vec![ContentBlock::Text(TextContent {
-            content: "1. use tools to assist user. 2. respond concisely without format, table, title for readability on phone. 3. keep the tone dry and neutral.".into(),
-        })],
+        content: vec![ContentBlock::Text(TextContent { content: include_str!("prompt.md").to_string() })],
     };
 
     if let Err(e) = telegram::dispatch(
         cli.telegram_token,
         allowed_ids,
         Arc::new(move |user| {
-            let session = match user {
+            let (session, extension, tools) = match user {
                 Some(user) => {
                     let dir = data_dir().join("db");
                     let _ = std::fs::create_dir_all(&dir);
-                    SqliteSession::new(
-                        dir.join(format!("{}.db", user.id.0)).to_str().ok_or(anyhow::anyhow!("invalid db path"))?,
-                        &uuid::Uuid::now_v7().to_string(),
-                    )
-                    .map_err(|e| anyhow::anyhow!(e))
-                }?
-                .arc(),
-                None => InMemorySession::new().arc(),
+                    let db_path_str = dir
+                        .join(format!("{}.db", user.id.0))
+                        .to_str()
+                        .ok_or(anyhow::anyhow!("invalid db path"))?
+                        .to_string();
+
+                    let prompt = prompt.clone();
+                    let loader = Arc::new(move |ref_name: &str| -> anyhow::Result<Box<dyn Session>> {
+                        let mut session = Box::new(SqliteSession::new(&db_path_str, ref_name)?);
+                        session.append(prompt.clone()).map_err(|e| anyhow::anyhow!("{e}"))?;
+                        Ok(session)
+                    });
+
+                    let (mux, ext, tool) = MuxSession::new("router", loader)?;
+                    let mut tools = tools.clone();
+                    tools.register(Box::new(tool));
+                    let mux: Arc<Mutex<dyn Session>> = mux;
+
+                    (mux, ext.into(), tools)
+                }
+                None => (InMemorySession::new().arc(), NoopExtension.into(), tools.clone()),
             };
-            session.lock().unwrap().append(prompt.clone()).map_err(|e| anyhow::anyhow!(e))?;
 
             Ok(Agent {
-                state: AgentState { model: model.clone(), tools: tools.clone(), session },
+                state: AgentState { model: model.clone(), tools: tools, session },
                 models: models.clone(),
-                extension: NoopExtension.into(),
+                extension,
             })
         }),
     )

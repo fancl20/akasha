@@ -16,7 +16,7 @@ pub struct MuxSession {
     active: Option<(String, Box<dyn Session>)>,
     router: Box<dyn Session>,
     pending: Vec<Message>,
-    skip_next: bool,
+    switching: bool,
 
     prompt_router: Message,
 }
@@ -28,7 +28,7 @@ impl MuxSession {
             router: loader(id)?,
             loader,
             pending: Vec::new(),
-            skip_next: false,
+            switching: false,
             prompt_router: Message {
                 role: "user".to_string(),
                 content: vec![ContentBlock::Text(TextContent {
@@ -49,30 +49,21 @@ impl MuxSession {
 
     fn switch(&mut self, id: &str) -> Result<(), SessionError> {
         let session = (self.loader)(id).map_err(|e| SessionError::Failed { message: e.to_string() })?;
-
-        for msg in self.pending.iter().filter(|m| match m.content.last() {
-            Some(ContentBlock::ToolResult(ToolResult { is_error: false, .. })) => true,
-            Some(ContentBlock::ToolCall(..)) => true,
-            _ => false,
-        }) {
-            self.router.append(msg.clone())?;
-        }
-
         self.active = Some((id.to_string(), session));
+        self.switching = true;
+        Ok(())
+    }
+
+    fn truncate_pending(&mut self) {
         if let Some(idx) = self.pending.iter().position(|m| m.role != "user") {
             self.pending.truncate(idx);
         }
-        Ok(())
     }
 }
 
 impl Session for MuxSession {
     fn append(&mut self, message: Message) -> Result<(), SessionError> {
-        if self.skip_next {
-            self.skip_next = false
-        } else {
-            self.pending.push(message);
-        }
+        self.pending.push(message);
         Ok(())
     }
 
@@ -115,7 +106,7 @@ impl ToolHandler for MuxSwitchTool {
                     },
                     "summary": {
                         "type": "string",
-                        "description": "Brief summary of the current conversation topic, used to identify this session for future routing."
+                        "description": "Brief summary of the current conversation topic EXCLUDING the message triggers the switch, used to identify this session for future routing."
                     }
                 }
             }),
@@ -137,13 +128,24 @@ impl ToolHandler for MuxSwitchTool {
                     })],
                     is_error: true,
                 }),
-                _ => Ok(ToolResult {
-                    tool_call_id: None,
-                    content: vec![ToolResultContent::Text(TextContent {
-                        content: format!("id: {}", mux.active.take().unwrap().0),
-                    })],
-                    is_error: false,
-                }),
+                summary => {
+                    let id = mux.active.as_ref().unwrap().0.clone();
+                    mux.router
+                        .append(Message {
+                            role: "user".to_string(),
+                            content: vec![
+                                ContentBlock::Text(TextContent { content: format!("id: {}", id) }),
+                                ContentBlock::Text(TextContent { content: format!("summary: {}", summary) }),
+                            ],
+                        })
+                        .map_err(|e| ToolError::Execution(e.to_string()))?;
+                    mux.active = None;
+                    Ok(ToolResult {
+                        tool_call_id: None,
+                        content: vec![ToolResultContent::Text(TextContent { content: format!("id: {}", id) })],
+                        is_error: false,
+                    })
+                }
             },
             None => {
                 let id = params
@@ -151,7 +153,6 @@ impl ToolHandler for MuxSwitchTool {
                     .and_then(|v| v.as_str())
                     .map_or_else(|| Uuid::now_v7().to_string(), |v| v.to_string());
                 mux.switch(&id).map_err(|e| ToolError::Execution(e.to_string()))?;
-                mux.skip_next = true;
 
                 Ok(ToolResult {
                     tool_call_id: None,
@@ -175,6 +176,16 @@ impl Extension for MuxExtension {
         "session/mux"
     }
 
+    async fn on_message_start(&mut self, messages: Vec<Message>) -> Result<Vec<Message>, ExtensionError> {
+        let mut mux = self.session.lock().unwrap();
+        if mux.switching {
+            mux.switching = false;
+            mux.truncate_pending();
+            return Ok(mux.messages().cloned().collect());
+        }
+        Ok(messages)
+    }
+
     async fn on_turn_end(&mut self, state: AgentState) -> Result<AgentState, ExtensionError> {
         let mut mux = self.session.lock().unwrap();
 
@@ -184,6 +195,7 @@ impl Extension for MuxExtension {
                 name: "session/mux".to_string(),
                 message: e.to_string(),
             })?;
+            mux.truncate_pending();
         }
 
         mux.flush()
@@ -211,19 +223,20 @@ mod tests {
         }
     }
 
-    fn tool_result_msg(content: &str) -> Message {
+    fn make_mux() -> (Arc<Mutex<MuxSession>>, MuxExtension, MuxSwitchTool) {
+        // Unit tests exercise the session mechanics, so each loaded session starts empty.
+        MuxSession::new("router", Arc::new(|_id| Ok(Box::new(InMemorySession::new())))).unwrap()
+    }
+
+    fn tool_result(call_id: &str, content: &str) -> Message {
         Message {
             role: "tool".to_string(),
             content: vec![ContentBlock::ToolResult(ToolResult {
-                tool_call_id: None,
+                tool_call_id: Some(call_id.to_string()),
                 content: vec![ToolResultContent::Text(TextContent { content: content.to_string() })],
                 is_error: false,
             })],
         }
-    }
-
-    fn make_mux() -> (Arc<Mutex<MuxSession>>, MuxExtension, MuxSwitchTool) {
-        MuxSession::new("router", Arc::new(|_id| Ok(Box::new(InMemorySession::new())))).unwrap()
     }
 
     fn make_mux_with_tracker() -> (Arc<Mutex<MuxSession>>, MuxExtension, MuxSwitchTool, Arc<Mutex<Vec<String>>>) {
@@ -312,42 +325,144 @@ mod tests {
     }
 
     #[test]
-    fn switch_routes_switch_tool_result_to_router() {
+    fn switch_binds_and_arms_without_routing_or_truncating() {
         let (mux, _, _) = make_mux();
         let mut m = mux.lock().unwrap();
 
-        // First switch to create an active session
         m.switch("s1").unwrap();
+        let router_before = m.router.messages().count();
 
-        // Simulate a realistic flow: user asks, assistant calls tool, tool returns switch result
-        m.append(text_msg("user", "switch topic")).unwrap();
-        let switch_msg = tool_result_msg("session-mux-switch\nid: s1\ntalked about rust");
-        m.append(switch_msg).unwrap();
+        // Routing context comes from the user message appended in MuxSwitchTool::execute,
+        // so switch() must not forward pending to the router; and truncation is deferred to
+        // on_message_start / on_turn_end, so switch() leaves pending untouched.
+        m.pending.push(text_msg("user", "switch topic"));
+        m.pending.push(tool_result("c1", "session-mux-switch result"));
 
-        // Switch triggers routing of switch messages to router
         m.switch("s2").unwrap();
 
-        // Router should have received the switch message
-        let router_msgs: Vec<_> = m.router.messages().collect();
-        assert_eq!(router_msgs.len(), 1, "router should have the switch tool result");
+        assert_eq!(m.router.messages().count(), router_before, "switch must not append anything to the router");
+        assert_eq!(m.active.as_ref().unwrap().0, "s2");
+        assert!(m.switching, "switch arms the switching flag");
+        assert_eq!(m.pending.len(), 2, "switch leaves pending for on_message_start / on_turn_end to truncate");
     }
 
     #[test]
-    fn switch_truncates_pending_at_first_non_user() {
+    fn retain_pending_users_drops_assistant_with_tool_calls() {
+        use crate::core::types::ToolCall;
+
+        let (mux, _, _) = make_mux();
+        let mut m = mux.lock().unwrap();
+        m.switch("s1").unwrap();
+
+        // pending: [user, assistant with switch + tavily tool calls]
+        m.pending.push(text_msg("user", "question"));
+        m.pending.push(Message {
+            role: "assistant".to_string(),
+            content: vec![
+                ContentBlock::Text(TextContent { content: "reasoning".to_string() }),
+                ContentBlock::ToolCall(ToolCall {
+                    id: "call_1".to_string(),
+                    name: "session-mux-switch".to_string(),
+                    arguments: serde_json::json!({}),
+                }),
+                ContentBlock::ToolCall(ToolCall {
+                    id: "call_2".to_string(),
+                    name: "tavily_extract".to_string(),
+                    arguments: serde_json::json!({}),
+                }),
+            ],
+        });
+
+        m.truncate_pending();
+
+        // The whole non-user tail is dropped — the new session does not inherit the
+        // router/switch tool use.
+        assert_eq!(m.pending.len(), 1, "only the leading user message is kept");
+        assert_eq!(m.pending[0].role, "user");
+    }
+
+    #[tokio::test]
+    async fn on_turn_end_fallback_flushes_only_users() {
+        let (mux, mut ext, _) = make_mux();
+        {
+            let mut m = mux.lock().unwrap();
+            m.active = None; // router failed to switch back → fallback will fire
+            m.pending.push(text_msg("user", "question"));
+            m.pending.push(text_msg("assistant", "router reasoning"));
+            m.pending.push(tool_result("c1", "switch result"));
+        }
+
+        let state = AgentState {
+            model: Model {
+                id: "m".to_string(),
+                provider: "p".to_string(),
+                context_window: 0,
+                base_url: String::new(),
+                headers: HashMap::new(),
+            },
+            tools: ToolRegistry::new(),
+            session: mux.clone(),
+        };
+        ext.on_turn_end(state).await.unwrap();
+
+        // switch() + retain_pending_users() + flush(): the new session must start from the
+        // user message only, not the router's reasoning or the switch result.
+        let m = mux.lock().unwrap();
+        assert!(m.active.is_some(), "fallback should bind a new active session");
+        let active: Vec<_> = m.active.as_ref().unwrap().1.messages().cloned().collect();
+        assert_eq!(active.len(), 1, "new session should contain only the user message");
+        assert!(active.iter().all(|x| x.role == "user"), "router reasoning must not leak into the new session");
+    }
+
+    #[tokio::test]
+    async fn on_message_start_drops_switch_result() {
+        let (mux, mut ext, tool) = make_mux();
+        {
+            let mut m = mux.lock().unwrap();
+            m.active = None; // start in routing session
+        }
+
+        // router→active: execute binds the active session and arms the switching flag.
+        let (_, rx) = futures::channel::oneshot::channel();
+        tool.execute(rx, serde_json::json!({"next_id": "s2"})).await.unwrap();
+
+        // The agent loop appends the switch tool result to pending after execute() returns.
+        {
+            let mut m = mux.lock().unwrap();
+            m.pending.push(text_msg("user", "question"));
+            m.pending.push(tool_result("c_switch", "switched to session 's2'."));
+        }
+
+        // The view read upstream of the hook is dirty — a dangling tool result with no
+        // preceding tool call, which providers reject.
+        let dirty: Vec<_> = mux.lock().unwrap().messages().cloned().collect();
+        assert_eq!(dirty.iter().filter(|m| m.role == "tool").count(), 1);
+
+        // on_message_start finalizes the switch: truncates the result and returns a clean view.
+        let clean = ext.on_message_start(dirty).await.unwrap();
+        assert_eq!(clean.iter().filter(|m| m.role == "tool").count(), 0, "switch result must be dropped");
+
+        let m = mux.lock().unwrap();
+        assert!(m.pending.iter().all(|m| m.role == "user"), "pending holds only user messages after finalize");
+        assert!(!m.switching, "switching flag is cleared");
+    }
+
+    #[test]
+    fn retain_pending_users_keeps_only_leading_users() {
         let (mux, _, _) = make_mux();
         let mut m = mux.lock().unwrap();
 
         m.switch("s1").unwrap();
 
         // Pending: user, assistant, user
-        m.append(text_msg("user", "q1")).unwrap();
-        m.append(text_msg("assistant", "a1")).unwrap();
-        m.append(text_msg("user", "q2")).unwrap();
+        m.pending.push(text_msg("user", "q1"));
+        m.pending.push(text_msg("assistant", "a1"));
+        m.pending.push(text_msg("user", "q2"));
 
-        m.switch("s2").unwrap();
+        m.truncate_pending();
 
-        // switch truncates pending at the first non-user role message
-        assert_eq!(m.pending.len(), 1, "pending should be truncated at first non-user message");
+        // Truncated at the first non-user message, so the trailing user message is dropped too.
+        assert_eq!(m.pending.len(), 1, "pending is truncated at the first non-user message");
         assert_eq!(m.pending[0].content[0], ContentBlock::Text(TextContent { content: "q1".to_string() }));
     }
 
@@ -370,6 +485,55 @@ mod tests {
         assert!(text.contains("summary is required"), "error message should mention summary, got: {text}");
     }
 
+    #[tokio::test]
+    async fn execute_to_router_appends_routing_message() {
+        let (mux, _, tool) = make_mux();
+        {
+            let mut m = mux.lock().unwrap();
+            m.switch("s1").unwrap();
+        }
+
+        let (_, rx) = futures::channel::oneshot::channel();
+        let result = tool.execute(rx, serde_json::json!({"summary": "talked about rust"})).await.unwrap();
+
+        assert!(!result.is_error, "switching to router with a summary should succeed");
+
+        let m = mux.lock().unwrap();
+        assert!(m.active.is_none(), "active should be cleared after switching to router session");
+        let router_msgs: Vec<_> = m.router.messages().cloned().collect();
+        assert_eq!(router_msgs.len(), 1, "router should receive one routing message");
+        assert_eq!(router_msgs[0].role, "user");
+        let text: String = router_msgs[0]
+            .content
+            .iter()
+            .filter_map(|b| match b {
+                ContentBlock::Text(t) => Some(t.content.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(text.contains("id: s1"), "routing message should carry the source session id, got: {text}");
+        assert!(text.contains("summary: talked about rust"), "routing message should carry the summary, got: {text}");
+    }
+
+    #[tokio::test]
+    async fn execute_to_active_switches_session() {
+        let (mux, _, tool) = make_mux();
+        {
+            let mut m = mux.lock().unwrap();
+            m.active = None; // start in routing session
+        }
+
+        let (_, rx) = futures::channel::oneshot::channel();
+        let result = tool.execute(rx, serde_json::json!({"next_id": "s2"})).await.unwrap();
+
+        assert!(!result.is_error);
+        let m = mux.lock().unwrap();
+        assert!(m.active.is_some(), "should switch into an active session");
+        assert_eq!(m.active.as_ref().unwrap().0, "s2");
+        assert!(m.switching, "router→active switch should arm the switching flag for on_message_start");
+    }
+
     // --- E2E test ---
 
     fn api_key() -> Option<String> {
@@ -386,16 +550,11 @@ mod tests {
         }
     }
 
-    fn extract_text(msg: &Message) -> String {
-        msg.content
-            .iter()
-            .filter_map(|b| match b {
-                ContentBlock::Text(t) => Some(t.content.as_str()),
-                _ => None,
-            })
-            .collect::<Vec<_>>()
-            .join(" ")
-            .to_lowercase()
+    fn user_text(content: &str) -> Message {
+        Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text(TextContent { content: content.to_string() })],
+        }
     }
 
     #[tokio::test]
@@ -408,60 +567,59 @@ mod tests {
         let mut registry = Registry::new();
         registry.register("deepseek", Box::new(DeepSeekProvider::new(key)));
 
-        let (mux, mux_ext, mux_tool) = make_mux();
+        // Prime every session with the topic-change instruction and track how many sessions
+        // the loader creates, so the test can confirm the mux actually routed.
+        let loaded_ids = Arc::new(Mutex::new(Vec::new()));
+        let tracked = loaded_ids.clone();
+        let (mux, mux_ext, mux_tool) = MuxSession::new(
+            "router",
+            Arc::new(move |id| {
+                tracked.lock().unwrap().push(id.to_string());
+                let mut session = Box::new(InMemorySession::new());
+                session.append(Message {
+                    role: "user".to_string(),
+                    content: vec![ContentBlock::Text(TextContent {
+                        content: "MUST detect whether topic changed before respond and if so, use the tool to switch session.".to_string(),
+                    })],
+                })?;
+                Ok(session)
+            }),
+        )
+        .unwrap();
+
         let mut tools = ToolRegistry::new();
         tools.register(Box::new(mux_tool));
 
         let agent_state = AgentState { model: test_model(), tools, session: mux };
         let mut agent = Agent { state: agent_state, models: Arc::new(registry), extension: Box::new(mux_ext) };
 
-        // Turn 1: topic A — Rust
-        let msg_a = Message {
-            role: "user".to_string(),
-            content: vec![ContentBlock::Text(TextContent {
-                content: "Tell me briefly about the Rust programming language in one sentence.".to_string(),
-            })],
-        };
-        agent.prompt(msg_a).await.expect("first prompt should succeed");
+        // Three turns across distinct topics. The primary regression this guards is a
+        // provider rejecting the message chain because of a dangling tool result after a
+        // switch — every prompt must complete cleanly. Exact routing is model-driven, so we
+        // only assert that the mux routed beyond the initial router + active sessions.
+        agent
+            .prompt(user_text("Tell me briefly about the Rust programming language in one sentence."))
+            .await
+            .expect("first prompt should succeed");
+        agent
+            .prompt(user_text("Tell me about Italian cuisine in one sentence."))
+            .await
+            .expect("second prompt should succeed");
+        agent
+            .prompt(user_text("Now compare Rust with C++ in two sentences."))
+            .await
+            .expect("third prompt should succeed");
 
-        // Turn 2: topic B — Italian cuisine (topic switch)
-        let msg_b = Message {
-            role: "user".to_string(),
-            content: vec![ContentBlock::Text(TextContent {
-                content: "Tell me about Italian cuisine in one sentence.".to_string(),
-            })],
-        };
-        agent.prompt(msg_b).await.expect("second prompt should succeed");
-
-        // Turn 3: back to topic A — compare Rust with C++
-        let msg_c = Message {
-            role: "user".to_string(),
-            content: vec![ContentBlock::Text(TextContent {
-                content: "Now compare Rust with C++ in two sentences.".to_string(),
-            })],
-        };
-        agent.prompt(msg_c).await.expect("third prompt should succeed");
-
-        let output: Vec<_> = agent.state.session.lock().unwrap().messages().cloned().collect();
-
-        // Verify message structure: three user-assistant pairs in alternation
-        assert_eq!(output.len(), 6, "should have 6 messages (3 user + 3 assistant), got {}", output.len());
-        for (i, expected_role) in ["user", "assistant", "user", "assistant", "user", "assistant"].iter().enumerate() {
-            assert_eq!(output[i].role, *expected_role, "message {i} should be {expected_role}, got {}", output[i].role);
-        }
-
-        // Verify the three user messages are exactly what we sent
-        let user_msgs: Vec<_> = output.iter().filter(|m| m.role == "user").map(|m| extract_text(m)).collect();
-        assert!(user_msgs[0].contains("rust"), "first user message should be about Rust, got: {}", user_msgs[0]);
+        // Initial construction loads the router + one active session (2). More than that
+        // means a session-mux-switch created or re-entered a session.
+        let session_count = loaded_ids.lock().unwrap().len();
         assert!(
-            user_msgs[1].contains("italian cuisine"),
-            "second user message should be about Italian cuisine, got: {}",
-            user_msgs[1]
+            session_count > 2,
+            "mux should have routed to a session beyond the initial two, loaded {session_count} sessions"
         );
-        assert!(
-            user_msgs[2].contains("rust") && user_msgs[2].contains("c++"),
-            "third user message should compare Rust and C++, got: {}",
-            user_msgs[2]
-        );
+
+        // prompt() only returns once the last message is an assistant response.
+        let last_role = agent.state.session.lock().unwrap().messages().last().map(|m| m.role.clone());
+        assert_eq!(last_role.as_deref(), Some("assistant"), "final message should be an assistant response");
     }
 }
