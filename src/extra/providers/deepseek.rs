@@ -448,7 +448,7 @@ mod tests {
 
     use super::*;
     use crate::core::extensions::NoopExtension;
-    use crate::core::providers::{Model, Provider, Registry};
+    use crate::core::providers::{Model, Provider};
     use crate::core::session::Session;
     use crate::core::tools::{ToolHandler, ToolRegistry};
     use crate::core::types::{ContentBlock, Message, TextContent, ToolDefinition, ToolResult, ToolResultContent};
@@ -785,8 +785,7 @@ mod tests {
             None => return,
         };
 
-        let mut registry = Registry::new();
-        registry.register("deepseek", Box::new(DeepSeekProvider::new(key)));
+        let provider: std::sync::Arc<dyn Provider> = std::sync::Arc::new(DeepSeekProvider::new(key));
 
         let mut tools = ToolRegistry::new();
         tools.register(GetCurrentLocationTool.into());
@@ -801,7 +800,7 @@ mod tests {
         };
         let mut agent = crate::core::agent::Agent {
             state: agent_state,
-            models: std::sync::Arc::new(registry),
+            provider,
             extension: NoopExtension.into(),
         };
 

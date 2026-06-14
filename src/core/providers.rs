@@ -93,27 +93,3 @@ pub trait Provider: Send + Sync {
 
     fn name(&self) -> &str;
 }
-
-pub struct Registry {
-    providers: HashMap<String, Box<dyn Provider>>,
-}
-
-impl Registry {
-    pub fn new() -> Self {
-        Self { providers: HashMap::new() }
-    }
-
-    pub fn register(&mut self, name: impl Into<String>, provider: Box<dyn Provider>) {
-        self.providers.insert(name.into(), provider);
-    }
-
-    pub fn get(&self, name: &str) -> Option<&dyn Provider> {
-        self.providers.get(name).map(|p| p.as_ref())
-    }
-}
-
-impl Default for Registry {
-    fn default() -> Self {
-        Self::new()
-    }
-}

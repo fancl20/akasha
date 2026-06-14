@@ -208,7 +208,7 @@ impl Extension for MuxExtension {
 mod tests {
     use super::*;
     use crate::core::agent::Agent;
-    use crate::core::providers::{Model, Registry};
+    use crate::core::providers::{Model, Provider};
     use crate::core::session::InMemorySession;
     use crate::core::tools::ToolRegistry;
     use crate::extra::providers::deepseek::DeepSeekProvider;
@@ -564,8 +564,7 @@ mod tests {
             None => return,
         };
 
-        let mut registry = Registry::new();
-        registry.register("deepseek", Box::new(DeepSeekProvider::new(key)));
+        let provider: Arc<dyn Provider> = Arc::new(DeepSeekProvider::new(key));
 
         // Prime every session with the topic-change instruction and track how many sessions
         // the loader creates, so the test can confirm the mux actually routed.
@@ -591,7 +590,7 @@ mod tests {
         tools.register(Box::new(mux_tool));
 
         let agent_state = AgentState { model: test_model(), tools, session: mux };
-        let mut agent = Agent { state: agent_state, models: Arc::new(registry), extension: Box::new(mux_ext) };
+        let mut agent = Agent { state: agent_state, provider, extension: Box::new(mux_ext) };
 
         // Three turns across distinct topics. The primary regression this guards is a
         // provider rejecting the message chain because of a dangling tool result after a

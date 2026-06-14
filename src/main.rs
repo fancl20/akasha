@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use akasha::core::agent::{Agent, AgentState};
 use akasha::core::extensions::NoopExtension;
-use akasha::core::providers::{Model, Registry};
+use akasha::core::providers::{Model, Provider};
 use akasha::core::session::{InMemorySession, Session};
 use akasha::core::tools::ToolRegistry;
 use akasha::core::types::{ContentBlock, Message, TextContent};
@@ -57,9 +57,6 @@ async fn main() {
     let api_key = cli.api_key.expect("api_key is required");
     let base_url = cli.base_url;
 
-    let mut models = Registry::new();
-    models.register("deepseek", Box::new(DeepSeekProvider::new(api_key)));
-
     let model = Model {
         id: "deepseek-v4-pro".into(),
         provider: provider,
@@ -67,6 +64,7 @@ async fn main() {
         base_url: base_url.unwrap_or_default(),
         headers: HashMap::from([("reasoning_effort".into(), "max".into())]),
     };
+    let provider: Arc<dyn Provider> = Arc::new(DeepSeekProvider::new(api_key));
 
     let mut tools = ToolRegistry::new();
     if let Some(mcps_path) = &cli.mcps {
@@ -83,7 +81,6 @@ async fn main() {
     }
 
     let allowed_ids: HashSet<u64> = cli.allowed_ids.into_iter().collect();
-    let models = Arc::new(models);
 
     let prompt = Message {
         role: "user".into(),
@@ -124,7 +121,7 @@ async fn main() {
 
             Ok(Agent {
                 state: AgentState { model: model.clone(), tools: tools, session },
-                models: models.clone(),
+                provider: provider.clone(),
                 extension,
             })
         }),

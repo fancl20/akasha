@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use futures::StreamExt;
 
 use crate::core::extensions::{Extension, ToolCallDecision};
-use crate::core::providers::{Model, Registry, StreamResponse};
+use crate::core::providers::{Model, Provider, StreamResponse};
 use crate::core::session::{Session, SessionError};
 use crate::core::tools::ToolRegistry;
 use crate::core::types::{ContentBlock, Message, TextContent, ToolResult, ToolResultContent};
@@ -34,7 +34,7 @@ pub struct AgentState {
 
 pub struct Agent {
     pub state: AgentState,
-    pub models: Arc<Registry>,
+    pub provider: Arc<dyn Provider>,
     pub extension: Box<dyn Extension>,
 }
 
@@ -45,7 +45,7 @@ impl Agent {
         loop {
             let mut state = self.extension.on_turn_start(self.state.clone()).await?;
 
-            state = agent_loop(state, &self.models, self.extension.as_mut()).await?;
+            state = agent_loop(state, self.provider.as_ref(), self.extension.as_mut()).await?;
 
             self.state = self.extension.on_turn_end(state).await?;
             match self.state.session.lock().unwrap().messages().last() {
@@ -60,13 +60,9 @@ impl Agent {
 
 pub async fn agent_loop(
     state: AgentState,
-    models: &Registry,
+    provider: &dyn Provider,
     extension: &mut dyn Extension,
 ) -> Result<AgentState, AgentError> {
-    let provider = models
-        .get(&state.model.provider)
-        .ok_or_else(|| AgentError::Other(format!("no provider registered for '{}'", state.model.provider)))?;
-
     loop {
         let messages = state.session.lock().unwrap().messages().cloned().collect();
         let messages = extension.on_message_start(messages).await?;
