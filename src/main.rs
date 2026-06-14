@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::ops::Sub;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -13,6 +14,7 @@ use akasha::extra::providers::deepseek::DeepSeekProvider;
 use akasha::extra::sessions::mux::session::MuxSession;
 use akasha::extra::sessions::sqlite::SqliteSession;
 use akasha::extra::tools::mcp;
+use chrono::{Duration, Local};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -109,7 +111,8 @@ async fn main() {
                         Ok(session)
                     });
 
-                    let (mux, ext, tool) = MuxSession::new("router", loader)?;
+                    let id = Local::now().sub(Duration::hours(4)).format("%Y-%m-%d").to_string();
+                    let (mux, ext, tool) = MuxSession::new(&id, loader)?;
                     let mut tools = tools.clone();
                     tools.register(Box::new(tool));
                     let mux: Arc<Mutex<dyn Session>> = mux;
