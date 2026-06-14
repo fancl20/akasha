@@ -182,6 +182,7 @@ enum State {
 
 type AgentDialogue = Dialogue<State, InMemStorage<State>>;
 type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
+type AgentFactory = Arc<dyn Fn(Option<User>) -> anyhow::Result<Agent> + Send + Sync + 'static>;
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Bot commands")]
@@ -192,9 +193,17 @@ enum Command {
     Help,
     #[command(description = "start talk with the agent")]
     Start,
+    #[command(description = "switch session for the prompt that follows")]
+    Switch(String),
 }
 
-async fn command_handler(bot: Bot, dialogue: AgentDialogue, msg: TgMessage, cmd: Command) -> HandlerResult {
+async fn command_handler(
+    bot: Bot,
+    dialogue: AgentDialogue,
+    msg: TgMessage,
+    cmd: Command,
+    agent_factory: AgentFactory,
+) -> HandlerResult {
     match cmd {
         Command::Start => {}
         Command::Reset => {
@@ -207,6 +216,13 @@ async fn command_handler(bot: Bot, dialogue: AgentDialogue, msg: TgMessage, cmd:
         Command::Help => {
             bot.send_message(msg.chat.id, Command::descriptions().to_string()).await?;
         }
+        Command::Switch(text) => {
+            let prompt = Message {
+                role: "user".into(),
+                content: vec![ContentBlock::Text(TextContent { content: format!("switch session: {text}") })],
+            };
+            handle_prompt(bot, dialogue, msg, prompt, agent_factory).await?;
+        }
     }
     Ok(())
 }
@@ -215,14 +231,25 @@ async fn handle_message(
     bot: Bot,
     dialogue: AgentDialogue,
     msg: TgMessage,
-    agent_factory: Arc<dyn Fn(Option<User>) -> anyhow::Result<Agent> + Send + Sync + 'static>,
+    agent_factory: AgentFactory,
 ) -> HandlerResult {
-    let prompt = if let Some(text) = msg.text() {
-        Message { role: "user".into(), content: vec![ContentBlock::Text(TextContent { content: text.to_owned() })] }
-    } else {
-        return Ok(());
+    let text = match msg.text() {
+        Some(text) => text.to_owned(),
+        None => return Ok(()),
     };
+    let prompt = Message { role: "user".into(), content: vec![ContentBlock::Text(TextContent { content: text })] };
+    handle_prompt(bot, dialogue, msg, prompt, agent_factory).await
+}
 
+/// Drives the agent dialogue with `prompt`, starting a new run when idle or
+/// queuing the prompt onto an in-flight run.
+async fn handle_prompt(
+    bot: Bot,
+    dialogue: AgentDialogue,
+    msg: TgMessage,
+    prompt: Message,
+    agent_factory: AgentFactory,
+) -> HandlerResult {
     match dialogue.get_or_default().await? {
         State::Idle => {
             let (event_tx, event_rx) = mpsc::unbounded_channel();
@@ -255,7 +282,8 @@ fn schema(ids: Arc<HashSet<u64>>) -> UpdateHandler<Box<dyn std::error::Error + S
     let command_handler = teloxide::filter_command::<Command, _>()
         .branch(dptree::case![Command::Start].endpoint(command_handler))
         .branch(dptree::case![Command::Help].endpoint(command_handler))
-        .branch(dptree::case![Command::Reset].endpoint(command_handler));
+        .branch(dptree::case![Command::Reset].endpoint(command_handler))
+        .branch(dptree::filter(|x| matches!(x, Command::Switch(..))).endpoint(command_handler));
 
     let message_handler = Update::filter_message()
         .filter(allowed_filter)
@@ -268,7 +296,7 @@ fn schema(ids: Arc<HashSet<u64>>) -> UpdateHandler<Box<dyn std::error::Error + S
 pub async fn dispatch(
     token: impl Into<String>,
     allowed_ids: HashSet<u64>,
-    agent_factory: Arc<dyn Fn(Option<User>) -> anyhow::Result<Agent> + Send + Sync + 'static>,
+    agent_factory: AgentFactory,
 ) -> Result<(), RequestError> {
     let bot = Bot::new(token.into());
     bot.set_my_commands(Command::bot_commands()).await?;
