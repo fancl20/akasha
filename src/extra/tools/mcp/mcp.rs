@@ -146,8 +146,13 @@ pub async fn register(
     let tools = service.list_all_tools().await.map_err(|e| McpToolError::Discovery(e.to_string()))?;
 
     for tool in tools {
+        let name = tool.name.into_owned();
+        if !server.is_tool_allowed(&name) {
+            continue;
+        }
+
         let definition = ToolDefinition {
-            name: tool.name.into_owned(),
+            name,
             description: tool.description.map(|d| d.into_owned()).unwrap_or_default(),
             parameters: serde_json::Value::Object(tool.input_schema.as_ref().clone()),
         };

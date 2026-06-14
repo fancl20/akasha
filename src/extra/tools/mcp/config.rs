@@ -44,6 +44,28 @@ pub struct StreamableHttpConfig {
     /// Optional HTTP headers (e.g. `Authorization`).
     #[serde(default)]
     pub headers: HashMap<String, String>,
+    /// Tool allowlist. When non-empty, only tools whose name appears here
+    /// are registered. Empty means "allow everything" (the default).
+    #[serde(default)]
+    pub allow: Vec<String>,
+    /// Tool denylist. A tool whose name appears here is never registered,
+    /// and a deny match overrides an allow match.
+    #[serde(default)]
+    pub deny: Vec<String>,
+}
+
+impl StreamableHttpConfig {
+    /// Returns `true` if a tool with the given name should be registered.
+    ///
+    /// A tool is allowed when it is not in `deny` and, when `allow` is
+    /// non-empty, is present in `allow`. An empty `allow` list means
+    /// "allow everything".
+    pub fn is_tool_allowed(&self, name: &str) -> bool {
+        if self.deny.iter().any(|p| p == name) {
+            return false;
+        }
+        self.allow.is_empty() || self.allow.iter().any(|p| p == name)
+    }
 }
 
 impl ServerEntry {
@@ -109,5 +131,57 @@ mod tests {
     fn empty_config() {
         let cfg: McpConfig = serde_json::from_str(r#"{"mcpServers":{}}"#).unwrap();
         assert!(cfg.mcp_servers.is_empty());
+    }
+
+    fn http(allow: &[&str], deny: &[&str]) -> StreamableHttpConfig {
+        StreamableHttpConfig {
+            url: "http://localhost/mcp".into(),
+            headers: HashMap::new(),
+            allow: allow.iter().map(|s| (*s).into()).collect(),
+            deny: deny.iter().map(|s| (*s).into()).collect(),
+        }
+    }
+
+    #[test]
+    fn empty_lists_allow_everything() {
+        let cfg = http(&[], &[]);
+        assert!(cfg.is_tool_allowed("anything"));
+        assert!(cfg.is_tool_allowed(""));
+    }
+
+    #[test]
+    fn allow_exact_name() {
+        let cfg = http(&["filesystem_read", "git_status"], &[]);
+        assert!(cfg.is_tool_allowed("filesystem_read"));
+        assert!(cfg.is_tool_allowed("git_status"));
+        assert!(!cfg.is_tool_allowed("filesystem_write"));
+        assert!(!cfg.is_tool_allowed("git"));
+    }
+
+    #[test]
+    fn deny_overrides_allow() {
+        let cfg = http(&["git_status"], &["git_status"]);
+        assert!(!cfg.is_tool_allowed("git_status"));
+    }
+
+    #[test]
+    fn deny_without_allow() {
+        let cfg = http(&[], &["dangerous", "exact"]);
+        assert!(!cfg.is_tool_allowed("dangerous"));
+        assert!(!cfg.is_tool_allowed("exact"));
+        assert!(cfg.is_tool_allowed("safe"));
+    }
+
+    #[test]
+    fn parses_allow_and_deny() {
+        let cfg: McpConfig = serde_json::from_str(
+            r#"{"mcpServers":{"s":{"url":"http://localhost/mcp","allow":["git_status"],"deny":["git_push"]}}}"#,
+        )
+        .unwrap();
+        let http = cfg.mcp_servers["s"].clone().into_config().unwrap();
+        assert_eq!(http.allow, vec!["git_status"]);
+        assert_eq!(http.deny, vec!["git_push"]);
+        assert!(!http.is_tool_allowed("git_push"));
+        assert!(http.is_tool_allowed("git_status"));
     }
 }
