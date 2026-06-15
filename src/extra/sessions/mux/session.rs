@@ -11,7 +11,12 @@ use crate::core::tools::{ToolError, ToolHandler};
 use crate::core::types::{ContentBlock, Message, TextContent, ToolDefinition, ToolResult, ToolResultContent};
 
 type SessionLoader = Arc<dyn Fn(&str) -> anyhow::Result<Box<dyn Session>> + Send + Sync + 'static>;
+type RouterIdResolver = Arc<dyn Fn() -> String + Send + Sync + 'static>;
+
 pub struct MuxSession {
+    id: String,
+    resolver: RouterIdResolver,
+
     loader: SessionLoader,
     active: Option<(String, Box<dyn Session>)>,
     router: Box<dyn Session>,
@@ -22,10 +27,18 @@ pub struct MuxSession {
 }
 
 impl MuxSession {
-    pub fn new(id: &str, loader: SessionLoader) -> anyhow::Result<(Arc<Mutex<Self>>, MuxExtension, MuxSwitchTool)> {
+    pub fn new(
+        resolver: RouterIdResolver,
+        loader: SessionLoader,
+    ) -> anyhow::Result<(Arc<Mutex<Self>>, MuxExtension, MuxSwitchTool)> {
+        // The router is named by resolving `router_id_resolver` (e.g. today's date) rather
+        // than a fixed id, so it can roll over to a fresh routing context across days.
+        let id = resolver();
         let mux = Arc::new(Mutex::new(MuxSession {
             active: None,
-            router: loader(id)?,
+            router: loader(&id)?,
+            id,
+            resolver,
             loader,
             pending: Vec::new(),
             switching: false,
@@ -58,6 +71,16 @@ impl MuxSession {
         if let Some(idx) = self.pending.iter().position(|m| m.role != "user") {
             self.pending.truncate(idx);
         }
+    }
+
+    fn reload(&mut self) -> Result<bool, SessionError> {
+        let id = (self.resolver)();
+        if id == self.id {
+            return Ok(false);
+        }
+        self.router = (self.loader)(&id).map_err(|e| SessionError::Failed { message: e.to_string() })?;
+        self.id = id;
+        Ok(true)
     }
 }
 
@@ -178,12 +201,24 @@ impl Extension for MuxExtension {
 
     async fn on_message_start(&mut self, messages: Vec<Message>) -> Result<Vec<Message>, ExtensionError> {
         let mut mux = self.session.lock().unwrap();
+        // Reload the router when its resolved id has rolled over (e.g. a new day), so the
+        // fresh routing context is in place before the next routing decision.
         if mux.switching {
             mux.switching = false;
             mux.truncate_pending();
             return Ok(mux.messages().cloned().collect());
         }
-        Ok(messages)
+
+        match mux.reload() {
+            Ok(reload) if reload => return Ok(mux.messages().cloned().collect()),
+            Err(e) => {
+                return Err(ExtensionError::ExtensionFailed {
+                    name: "session/mux".to_string(),
+                    message: e.to_string(),
+                });
+            }
+            _ => Ok(messages),
+        }
     }
 
     async fn on_turn_end(&mut self, state: AgentState) -> Result<AgentState, ExtensionError> {
@@ -225,7 +260,8 @@ mod tests {
 
     fn make_mux() -> (Arc<Mutex<MuxSession>>, MuxExtension, MuxSwitchTool) {
         // Unit tests exercise the session mechanics, so each loaded session starts empty.
-        MuxSession::new("router", Arc::new(|_id| Ok(Box::new(InMemorySession::new())))).unwrap()
+        MuxSession::new(Arc::new(|| "router".to_string()), Arc::new(|_id| Ok(Box::new(InMemorySession::new()))))
+            .unwrap()
     }
 
     fn tool_result(call_id: &str, content: &str) -> Message {
@@ -243,7 +279,7 @@ mod tests {
         let loaded_ids = Arc::new(Mutex::new(Vec::new()));
         let ids = loaded_ids.clone();
         let mux = MuxSession::new(
-            "router",
+            Arc::new(|| "router".to_string()),
             Arc::new(move |id| {
                 ids.lock().unwrap().push(id.to_string());
                 Ok(Box::new(InMemorySession::new()))
@@ -467,6 +503,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn router_rolls_over_when_resolved_id_changes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let loaded = Arc::new(Mutex::new(Vec::new()));
+        let tracked = loaded.clone();
+        let loader = Arc::new(move |id: &str| {
+            tracked.lock().unwrap().push(id.to_string());
+            Ok(Box::new(InMemorySession::new()) as Box<dyn Session>)
+        });
+
+        // Each call advances the resolved id, simulating the date moving forward across days.
+        let counter = Arc::new(AtomicUsize::new(0));
+        let c = counter.clone();
+        let resolver: Arc<dyn Fn() -> String + Send + Sync> =
+            Arc::new(move || format!("day-{}", c.fetch_add(1, Ordering::SeqCst)));
+
+        let (mux, mut ext, _tool) = MuxSession::new(resolver, loader).unwrap();
+        // new() loads the router under "day-0" plus the initial active session.
+        {
+            let ids = loaded.lock().unwrap();
+            assert!(ids.iter().any(|id| id == "day-0"), "router should load under the initial id; got {ids:?}");
+        }
+
+        // new() also arms the switching flag for the initial active session. The first
+        // on_message_start finalizes that switch; reload() only runs on later, non-switching
+        // turns — which is also when the router is consulted (active becomes None via the
+        // switch tool, which does not arm switching).
+        let view = mux.lock().unwrap().messages().cloned().collect::<Vec<_>>();
+        ext.on_message_start(view).await.unwrap();
+
+        // A later turn: the resolver now yields a fresh id, so on_message_start must reload
+        // the router under "day-1" instead of reusing the stale "day-0" session.
+        let view = mux.lock().unwrap().messages().cloned().collect::<Vec<_>>();
+        ext.on_message_start(view).await.unwrap();
+
+        let ids = loaded.lock().unwrap();
+        assert!(ids.iter().any(|id| id == "day-1"), "router should reload under the rolled-over id; got {ids:?}");
+    }
+
+    #[tokio::test]
     async fn active_without_summary_returns_error() {
         let (mux, _, tool) = make_mux();
         {
@@ -571,7 +647,7 @@ mod tests {
         let loaded_ids = Arc::new(Mutex::new(Vec::new()));
         let tracked = loaded_ids.clone();
         let (mux, mux_ext, mux_tool) = MuxSession::new(
-            "router",
+            Arc::new(|| "router".to_string()),
             Arc::new(move |id| {
                 tracked.lock().unwrap().push(id.to_string());
                 let mut session = Box::new(InMemorySession::new());

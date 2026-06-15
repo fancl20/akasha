@@ -108,8 +108,8 @@ async fn main() {
                         Ok(session)
                     });
 
-                    let id = Local::now().sub(Duration::hours(4)).format("%Y-%m-%d").to_string();
-                    let (mux, ext, tool) = MuxSession::new(&id, loader)?;
+                    let id = Arc::new(|| Local::now().sub(Duration::hours(4)).format("%Y-%m-%d").to_string());
+                    let (mux, ext, tool) = MuxSession::new(id, loader)?;
                     let mut tools = tools.clone();
                     tools.register(Box::new(tool));
                     let mux: Arc<Mutex<dyn Session>> = mux;
