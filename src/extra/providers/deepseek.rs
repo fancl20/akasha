@@ -126,7 +126,7 @@ struct ChunkUsage {
     prompt_cache_miss_tokens: Option<u64>,
 }
 
-fn build_messages(messages: &Vec<Message>) -> Vec<ApiMessage> {
+fn build_messages<'a>(messages: impl Iterator<Item = &'a Message>) -> Vec<ApiMessage> {
     let mut out = Vec::new();
 
     for msg in messages {
@@ -382,10 +382,10 @@ async fn emit_done(tx: &mut futures::channel::mpsc::Sender<StreamResponse>, usag
 
 #[async_trait]
 impl Provider for DeepSeekProvider {
-    async fn stream(
+    async fn stream<'a>(
         &self,
         model: &Model,
-        messages: &Vec<Message>,
+        messages: Box<dyn Iterator<Item = &'a Message> + Send + 'a>,
         tools: &Vec<ToolDefinition>,
     ) -> Result<StreamResponseStream, ProviderError> {
         let api_messages = build_messages(messages);
@@ -493,7 +493,7 @@ mod tests {
                 content: vec![ContentBlock::Text(TextContent { content: "Hello".to_string() })],
             },
         ];
-        let api_messages = build_messages(&messages);
+        let api_messages = build_messages(messages.iter());
         assert_eq!(api_messages.len(), 2);
     }
 
@@ -521,7 +521,7 @@ mod tests {
                 })],
             },
         ];
-        let api_messages = build_messages(&messages);
+        let api_messages = build_messages(messages.iter());
         assert_eq!(api_messages.len(), 3);
     }
 
@@ -581,7 +581,7 @@ mod tests {
         let messages = simple_messages("Reply with exactly: PONG");
         let tools: Vec<ToolDefinition> = vec![];
 
-        let stream = provider.stream(&model, &messages, &tools).await.unwrap();
+        let stream = provider.stream(&model, Box::new(messages.iter()), &tools).await.unwrap();
         let responses = collect_stream(stream).await;
 
         assert!(!responses.is_empty(), "should receive at least one response");
@@ -610,7 +610,7 @@ mod tests {
         let messages = simple_messages("Say hi in one word.");
         let tools: Vec<ToolDefinition> = vec![];
 
-        let stream = provider.stream(&model, &messages, &tools).await.unwrap();
+        let stream = provider.stream(&model, Box::new(messages.iter()), &tools).await.unwrap();
         let responses = collect_stream(stream).await;
 
         let has_usage = responses.iter().any(|r| r.usage.input_tokens > 0);
@@ -628,7 +628,7 @@ mod tests {
         let messages = simple_messages("Say hello.");
         let tools: Vec<ToolDefinition> = vec![];
 
-        let stream = provider.stream(&model, &messages, &tools).await.unwrap();
+        let stream = provider.stream(&model, Box::new(messages.iter()), &tools).await.unwrap();
         let responses = collect_stream(stream).await;
 
         let last = responses.last().expect("should have responses");
@@ -662,7 +662,7 @@ mod tests {
         }];
 
         let stream: Pin<Box<dyn Stream<Item = StreamResponse> + Send>> =
-            provider.stream(&model, &messages, &tools).await.unwrap();
+            provider.stream(&model, Box::new(messages.iter()), &tools).await.unwrap();
         let responses = collect_stream(stream).await;
 
         let has_tool_call =
@@ -677,7 +677,7 @@ mod tests {
         let messages = simple_messages("Hi");
         let tools: Vec<ToolDefinition> = vec![];
 
-        let result = provider.stream(&model, &messages, &tools).await;
+        let result = provider.stream(&model, Box::new(messages.iter()), &tools).await;
         assert!(result.is_err(), "invalid API key should return an error");
     }
 
@@ -698,7 +698,7 @@ mod tests {
         let messages = simple_messages("Hi");
         let tools: Vec<ToolDefinition> = vec![];
 
-        let result = provider.stream(&model, &messages, &tools).await;
+        let result = provider.stream(&model, Box::new(messages.iter()), &tools).await;
         assert!(result.is_err(), "unknown model should return an error");
     }
 

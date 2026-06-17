@@ -41,10 +41,10 @@ impl TierProvider {
 
 #[async_trait]
 impl Provider for TierProvider {
-    async fn stream(
+    async fn stream<'a>(
         &self,
         model: &Model,
-        messages: &Vec<Message>,
+        messages: Box<dyn Iterator<Item = &'a Message> + Send + 'a>,
         tools: &Vec<ToolDefinition>,
     ) -> Result<StreamResponseStream, ProviderError> {
         let target = self
@@ -84,10 +84,10 @@ mod tests {
 
     #[async_trait]
     impl Provider for RecordingProvider {
-        async fn stream(
+        async fn stream<'a>(
             &self,
             model: &Model,
-            _messages: &Vec<Message>,
+            _messages: Box<dyn Iterator<Item = &'a Message> + Send + 'a>,
             _tools: &Vec<ToolDefinition>,
         ) -> Result<StreamResponseStream, ProviderError> {
             self.seen.lock().unwrap().push(model.id.clone());
@@ -149,8 +149,8 @@ mod tests {
             .tier("high", target_model("back", "real-high"))
             .tier("mid", target_model("back", "real-mid"));
 
-        drain(tp.stream(&tier_request("high"), &vec![], &vec![]).await.unwrap()).await;
-        drain(tp.stream(&tier_request("mid"), &vec![], &vec![]).await.unwrap()).await;
+        drain(tp.stream(&tier_request("high"), Box::new(std::iter::empty::<&Message>()), &vec![]).await.unwrap()).await;
+        drain(tp.stream(&tier_request("mid"), Box::new(std::iter::empty::<&Message>()), &vec![]).await.unwrap()).await;
 
         // The backend saw the *target* model ids, never the tier names.
         let observed = seen.lock().unwrap().clone();
@@ -164,7 +164,7 @@ mod tests {
             .provider("back", backend(seen))
             .tier("high", target_model("back", "real-high"));
 
-        let result = tp.stream(&tier_request("nope"), &vec![], &vec![]).await;
+        let result = tp.stream(&tier_request("nope"), Box::new(std::iter::empty::<&Message>()), &vec![]).await;
         assert!(matches!(result, Err(ProviderError::ModelNotFound(ref s)) if s == "nope"));
     }
 
@@ -173,7 +173,7 @@ mod tests {
         // No backends registered: the tier points at a provider nobody registered.
         let tp = TierProvider::new("tier").tier("high", target_model("no-such-provider", "real-high"));
 
-        let result = tp.stream(&tier_request("high"), &vec![], &vec![]).await;
+        let result = tp.stream(&tier_request("high"), Box::new(std::iter::empty::<&Message>()), &vec![]).await;
         assert!(matches!(result, Err(ProviderError::RequestFailed(_))));
     }
 
@@ -193,8 +193,8 @@ mod tests {
             .tier("high", target_model("a", "real-high"))
             .tier("mid", target_model("b", "real-mid"));
 
-        drain(tp.stream(&tier_request("high"), &vec![], &vec![]).await.unwrap()).await;
-        drain(tp.stream(&tier_request("mid"), &vec![], &vec![]).await.unwrap()).await;
+        drain(tp.stream(&tier_request("high"), Box::new(std::iter::empty::<&Message>()), &vec![]).await.unwrap()).await;
+        drain(tp.stream(&tier_request("mid"), Box::new(std::iter::empty::<&Message>()), &vec![]).await.unwrap()).await;
 
         assert_eq!(seen_a.lock().unwrap().as_slice(), &["real-high".to_string()]);
         assert_eq!(seen_b.lock().unwrap().as_slice(), &["real-mid".to_string()]);

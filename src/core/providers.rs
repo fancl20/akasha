@@ -84,10 +84,10 @@ pub type StreamResponseStream = Pin<Box<dyn Stream<Item = StreamResponse> + Send
 
 #[async_trait]
 pub trait Provider: Send + Sync {
-    async fn stream(
+    async fn stream<'a>(
         &self,
         model: &Model,
-        messages: &Vec<Message>,
+        messages: Box<dyn Iterator<Item = &'a Message> + Send + 'a>,
         tools: &Vec<ToolDefinition>,
     ) -> Result<StreamResponseStream, ProviderError>;
 
