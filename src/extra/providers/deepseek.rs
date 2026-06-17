@@ -798,11 +798,7 @@ mod tests {
             tools,
             session: crate::core::session::InMemorySession::new().arc(),
         };
-        let mut agent = crate::core::agent::Agent {
-            state: agent_state,
-            provider,
-            extension: NoopExtension.into(),
-        };
+        let mut agent = crate::core::agent::Agent { state: agent_state, provider, extension: NoopExtension.into() };
 
         let user_msg = Message {
             role: "user".into(),

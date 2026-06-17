@@ -47,10 +47,7 @@ impl Provider for TierProvider {
         messages: Box<dyn Iterator<Item = &'a Message> + Send + 'a>,
         tools: &Vec<ToolDefinition>,
     ) -> Result<StreamResponseStream, ProviderError> {
-        let target = self
-            .tiers
-            .get(&model.id)
-            .ok_or_else(|| ProviderError::ModelNotFound(model.id.clone()))?;
+        let target = self.tiers.get(&model.id).ok_or_else(|| ProviderError::ModelNotFound(model.id.clone()))?;
         let provider = self.providers.get(&target.provider).ok_or_else(|| {
             ProviderError::RequestFailed(format!(
                 "no provider '{}' registered for tier '{}'",
@@ -72,7 +69,7 @@ mod tests {
 
     use crate::core::providers::StreamResponse;
     use crate::core::types::{ContentBlock, TextContent, TokenUsage};
-    use futures::{stream, StreamExt};
+    use futures::{StreamExt, stream};
 
     /// A backend that records the model id it was asked to stream and returns a
     /// single deterministic chunk. Shares its log via `Arc` so the test can read it
@@ -160,9 +157,8 @@ mod tests {
     #[tokio::test]
     async fn unknown_tier_is_model_not_found() {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let tp = TierProvider::new("tier")
-            .provider("back", backend(seen))
-            .tier("high", target_model("back", "real-high"));
+        let tp =
+            TierProvider::new("tier").provider("back", backend(seen)).tier("high", target_model("back", "real-high"));
 
         let result = tp.stream(&tier_request("nope"), Box::new(std::iter::empty::<&Message>()), &vec![]).await;
         assert!(matches!(result, Err(ProviderError::ModelNotFound(ref s)) if s == "nope"));

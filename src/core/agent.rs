@@ -68,7 +68,9 @@ pub async fn agent_loop(
         let messages = extension.on_message_start(messages).await?;
 
         let mut response = StreamResponse::new();
-        let mut stream = provider.stream(&state.model, Box::new(messages.iter()), &state.tools.definitions()).await?;
+        let mut stream = provider
+            .stream(&state.model, Box::new(messages.iter().filter(|m| m.role != "custom")), &state.tools.definitions())
+            .await?;
         while let Some(chunk) = stream.next().await {
             extension.on_message_update(&chunk).await?;
             response.merge(chunk);
