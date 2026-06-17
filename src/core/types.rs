@@ -38,6 +38,7 @@ pub enum ContentBlock {
     Reasoning(TextContent),
     ToolCall(ToolCall),
     ToolResult(ToolResult),
+    Custom { r#type: String, content: serde_json::Value },
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -46,13 +47,20 @@ pub struct Message {
     pub content: Vec<ContentBlock>,
 }
 
-pub type JsonSchema = serde_json::Value;
+impl Message {
+    pub fn custom(&self, r#type: &str) -> Option<&serde_json::Value> {
+        self.content.iter().find_map(|b| match b {
+            ContentBlock::Custom { r#type: t, content } if t == r#type => Some(content),
+            _ => None,
+        })
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
-    pub parameters: JsonSchema,
+    pub parameters: serde_json::Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -43,6 +43,9 @@ impl Extension for And {
 
     async fn on_turn_end(&mut self, state: AgentState) -> Result<AgentState, ExtensionError> {
         let state = self.a.on_turn_end(state).await?;
+        if state.session.lock().unwrap().messages().last().map_or(false, |msg| msg.role != "assistant") {
+            return Ok(state);
+        }
         self.b.on_turn_end(state).await
     }
 
@@ -87,9 +90,84 @@ impl Extension for And {
 mod tests {
     use super::*;
     use crate::core::extensions::NoopExtension;
-    use crate::core::types::ContentBlock;
+    use crate::core::providers::Model;
+    use crate::core::session::{InMemorySession, Session};
+    use crate::core::tools::ToolRegistry;
+    use crate::core::types::{ContentBlock, TextContent};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
 
     use super::super::test_helpers::*;
+
+    /// Appends a message of `role` to the session in `on_turn_end`, simulating an extension
+    /// (like the mux fallback) that leaves the turn ending in a non-assistant message.
+    struct TurnEndAppend {
+        role: &'static str,
+    }
+
+    #[async_trait]
+    impl Extension for TurnEndAppend {
+        fn name(&self) -> &str {
+            "append"
+        }
+
+        async fn on_turn_end(&mut self, state: AgentState) -> Result<AgentState, ExtensionError> {
+            state
+                .session
+                .lock()
+                .unwrap()
+                .append(Message {
+                    role: self.role.to_string(),
+                    content: vec![ContentBlock::Text(TextContent { content: self.role.into() })],
+                })
+                .map_err(|e| ExtensionError::ExtensionFailed { name: "append".into(), message: e.to_string() })?;
+            Ok(state)
+        }
+    }
+
+    /// Records whether its `on_turn_end` ran, standing in for an extension that blocks for the
+    /// next user input (such as telegram).
+    struct TurnEndRecorder {
+        called: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl Extension for TurnEndRecorder {
+        fn name(&self) -> &str {
+            "recorder"
+        }
+
+        async fn on_turn_end(&mut self, state: AgentState) -> Result<AgentState, ExtensionError> {
+            self.called.store(true, Ordering::SeqCst);
+            Ok(state)
+        }
+    }
+
+    /// Builds an `AgentState` over a session pre-seeded with a single assistant message, so the
+    /// turn is in the same state `agent_loop` leaves it before `on_turn_end` runs.
+    fn turn_end_state() -> (AgentState, Arc<Mutex<dyn crate::core::session::Session>>) {
+        let mut session = InMemorySession::new();
+        session
+            .append(Message {
+                role: "assistant".into(),
+                content: vec![ContentBlock::Text(TextContent { content: "response".into() })],
+            })
+            .unwrap();
+        let session: Arc<Mutex<dyn crate::core::session::Session>> = Arc::new(Mutex::new(session));
+        let state = AgentState {
+            model: Model {
+                id: "m".into(),
+                provider: "p".into(),
+                context_window: 0,
+                base_url: String::new(),
+                headers: HashMap::new(),
+            },
+            tools: ToolRegistry::new(),
+            session: session.clone(),
+        };
+        (state, session)
+    }
 
     #[tokio::test]
     async fn test_and_name() {
@@ -159,5 +237,35 @@ mod tests {
             result[0].content,
             vec![ContentBlock::Text(crate::core::types::TextContent { content: "hello".into() })]
         );
+    }
+
+    #[tokio::test]
+    async fn test_and_on_turn_end_aborts_when_not_assistant() {
+        // `a` (like the mux fallback) leaves the session ending in a user message, so the turn
+        // did not cleanly complete — `b` must not run.
+        let recorder = Arc::new(AtomicBool::new(false));
+        let mut ext = And::new(TurnEndAppend { role: "user" }, TurnEndRecorder { called: recorder.clone() });
+        let (state, session) = turn_end_state();
+
+        ext.on_turn_end(state).await.unwrap();
+
+        assert!(
+            !recorder.load(Ordering::SeqCst),
+            "b must not run when the turn no longer ends in an assistant message"
+        );
+        let last_role = session.lock().unwrap().messages().last().map(|m| m.role.clone());
+        assert_eq!(last_role.as_deref(), Some("user"), "the user message appended by a must be preserved");
+    }
+
+    #[tokio::test]
+    async fn test_and_on_turn_end_runs_b_when_assistant() {
+        // `a` leaves the session still ending in an assistant message, so `b` runs as usual.
+        let recorder = Arc::new(AtomicBool::new(false));
+        let mut ext = And::new(TurnEndAppend { role: "assistant" }, TurnEndRecorder { called: recorder.clone() });
+        let (state, _session) = turn_end_state();
+
+        ext.on_turn_end(state).await.unwrap();
+
+        assert!(recorder.load(Ordering::SeqCst), "b must run when the turn still ends in an assistant message");
     }
 }

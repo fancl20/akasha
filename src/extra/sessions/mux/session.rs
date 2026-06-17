@@ -21,7 +21,6 @@ pub struct MuxSession {
     active: Option<(String, Box<dyn Session>)>,
     router: Box<dyn Session>,
     pending: Vec<Message>,
-    switching: bool,
 
     prompt_router: Message,
 }
@@ -41,7 +40,6 @@ impl MuxSession {
             resolver,
             loader,
             pending: Vec::new(),
-            switching: false,
             prompt_router: Message {
                 role: "user".to_string(),
                 content: vec![ContentBlock::Text(TextContent {
@@ -63,14 +61,10 @@ impl MuxSession {
     fn switch(&mut self, id: &str) -> Result<(), SessionError> {
         let session = (self.loader)(id).map_err(|e| SessionError::Failed { message: e.to_string() })?;
         self.active = Some((id.to_string(), session));
-        self.switching = true;
-        Ok(())
-    }
-
-    fn truncate_pending(&mut self) {
         if let Some(idx) = self.pending.iter().position(|m| m.role != "user") {
             self.pending.truncate(idx);
         }
+        Ok(())
     }
 
     fn reload(&mut self) -> Result<bool, SessionError> {
@@ -175,8 +169,13 @@ impl ToolHandler for MuxSwitchTool {
                     .get("next_id")
                     .and_then(|v| v.as_str())
                     .map_or_else(|| Uuid::now_v7().to_string(), |v| v.to_string());
-                mux.switch(&id).map_err(|e| ToolError::Execution(e.to_string()))?;
-
+                mux.pending.push(Message {
+                    role: "custom".to_string(),
+                    content: vec![ContentBlock::Custom {
+                        r#type: "session-mux-switch".to_string(),
+                        content: serde_json::json!({ "id": id }),
+                    }],
+                });
                 Ok(ToolResult {
                     tool_call_id: None,
                     content: vec![ToolResultContent::Text(TextContent {
@@ -201,13 +200,24 @@ impl Extension for MuxExtension {
 
     async fn on_message_start(&mut self, messages: Vec<Message>) -> Result<Vec<Message>, ExtensionError> {
         let mut mux = self.session.lock().unwrap();
-        // Reload the router when its resolved id has rolled over (e.g. a new day), so the
-        // fresh routing context is in place before the next routing decision.
-        if mux.switching {
-            mux.switching = false;
-            mux.truncate_pending();
+        if mux.active.is_none() {
+            mux.pending
+                .iter()
+                .find_map(|msg| msg.custom("session-mux-switch"))
+                .and_then(|b| b.get("id"))
+                .and_then(|v| v.as_str())
+                .map(String::from)
+                .map(|id| mux.switch(&id))
+                .unwrap_or(Ok(()))
+                .map_err(|e| ExtensionError::ExtensionFailed {
+                    name: "session/mux".to_string(),
+                    message: e.to_string(),
+                })?;
             return Ok(mux.messages().cloned().collect());
         }
+
+        // Reload the router when its resolved id has rolled over (e.g. a new day), so the
+        // fresh routing context is in place before the next routing decision.
 
         match mux.reload() {
             Ok(reload) if reload => return Ok(mux.messages().cloned().collect()),
@@ -230,7 +240,6 @@ impl Extension for MuxExtension {
                 name: "session/mux".to_string(),
                 message: e.to_string(),
             })?;
-            mux.truncate_pending();
         }
 
         mux.flush()
@@ -287,6 +296,17 @@ mod tests {
         )
         .unwrap();
         (mux.0.clone(), mux.1, mux.2, loaded_ids)
+    }
+
+    /// Reads the next active session id from the deferred-switch control message in pending,
+    /// mirroring `MuxExtension::on_message_start`'s lookup. Returns `None` when no switch is armed.
+    fn switch_target(mux: &MuxSession) -> Option<String> {
+        mux.pending
+            .iter()
+            .find_map(|msg| msg.custom("session-mux-switch"))
+            .and_then(|v| v.get("id"))
+            .and_then(|v| v.as_str())
+            .map(String::from)
     }
 
     // --- Unit tests ---
@@ -361,16 +381,15 @@ mod tests {
     }
 
     #[test]
-    fn switch_binds_and_arms_without_routing_or_truncating() {
+    fn switch_binds_and_truncates_without_routing() {
         let (mux, _, _) = make_mux();
         let mut m = mux.lock().unwrap();
 
         m.switch("s1").unwrap();
         let router_before = m.router.messages().count();
 
-        // Routing context comes from the user message appended in MuxSwitchTool::execute,
-        // so switch() must not forward pending to the router; and truncation is deferred to
-        // on_message_start / on_turn_end, so switch() leaves pending untouched.
+        // switch() binds directly: it neither forwards anything to the router nor leaves the
+        // non-user tail — truncation now happens at bind time, not in on_message_start / on_turn_end.
         m.pending.push(text_msg("user", "switch topic"));
         m.pending.push(tool_result("c1", "session-mux-switch result"));
 
@@ -378,8 +397,27 @@ mod tests {
 
         assert_eq!(m.router.messages().count(), router_before, "switch must not append anything to the router");
         assert_eq!(m.active.as_ref().unwrap().0, "s2");
-        assert!(m.switching, "switch arms the switching flag");
-        assert_eq!(m.pending.len(), 2, "switch leaves pending for on_message_start / on_turn_end to truncate");
+        assert_eq!(m.pending.len(), 1, "switch truncates pending at the first non-user message");
+    }
+
+    #[tokio::test]
+    async fn execute_arms_deferred_switch_without_binding() {
+        let (mux, _, tool) = make_mux();
+        {
+            let mut m = mux.lock().unwrap();
+            m.active = None; // routing state
+        }
+        let router_before = mux.lock().unwrap().router.messages().count();
+
+        // router→active: execute arms a deferred switch via a control marker; it neither binds
+        // nor routes — on_message_start realizes the switch when no session is active.
+        let (_, rx) = futures::channel::oneshot::channel();
+        tool.execute(rx, serde_json::json!({"next_id": "s2"})).await.unwrap();
+
+        let m = mux.lock().unwrap();
+        assert!(m.active.is_none(), "arming must defer binding to on_message_start");
+        assert_eq!(m.router.messages().count(), router_before, "arming must not append to the router");
+        assert_eq!(switch_target(&m).as_deref(), Some("s2"), "control carries the next active id");
     }
 
     #[test]
@@ -409,7 +447,9 @@ mod tests {
             ],
         });
 
-        m.truncate_pending();
+        // Truncation now happens inside switch(): binding a session drops the non-user tail so
+        // the new session does not inherit the router/switch tool use.
+        m.switch("s1").unwrap();
 
         // The whole non-user tail is dropped — the new session does not inherit the
         // router/switch tool use.
@@ -458,29 +498,30 @@ mod tests {
             m.active = None; // start in routing session
         }
 
-        // router→active: execute binds the active session and arms the switching flag.
+        // router→active: execute arms a deferred switch (control carries the id); it does not bind.
         let (_, rx) = futures::channel::oneshot::channel();
         tool.execute(rx, serde_json::json!({"next_id": "s2"})).await.unwrap();
+        {
+            let m = mux.lock().unwrap();
+            assert!(m.active.is_none(), "execute defers binding to on_message_start");
+            assert_eq!(switch_target(&m).as_deref(), Some("s2"));
+        }
 
         // The agent loop appends the switch tool result to pending after execute() returns.
         {
             let mut m = mux.lock().unwrap();
-            m.pending.push(text_msg("user", "question"));
             m.pending.push(tool_result("c_switch", "switched to session 's2'."));
         }
 
-        // The view read upstream of the hook is dirty — a dangling tool result with no
-        // preceding tool call, which providers reject.
+        // on_message_start realizes the deferred switch: binds s2 and drops the control marker
+        // plus the dangling tool result, so the provider never sees either.
         let dirty: Vec<_> = mux.lock().unwrap().messages().cloned().collect();
-        assert_eq!(dirty.iter().filter(|m| m.role == "tool").count(), 1);
-
-        // on_message_start finalizes the switch: truncates the result and returns a clean view.
         let clean = ext.on_message_start(dirty).await.unwrap();
         assert_eq!(clean.iter().filter(|m| m.role == "tool").count(), 0, "switch result must be dropped");
 
         let m = mux.lock().unwrap();
-        assert!(m.pending.iter().all(|m| m.role == "user"), "pending holds only user messages after finalize");
-        assert!(!m.switching, "switching flag is cleared");
+        assert_eq!(m.active.as_ref().unwrap().0, "s2", "on_message_start binds the deferred session");
+        assert!(switch_target(&m).is_none(), "switch control message is consumed");
     }
 
     #[test]
@@ -488,14 +529,13 @@ mod tests {
         let (mux, _, _) = make_mux();
         let mut m = mux.lock().unwrap();
 
-        m.switch("s1").unwrap();
-
         // Pending: user, assistant, user
         m.pending.push(text_msg("user", "q1"));
         m.pending.push(text_msg("assistant", "a1"));
         m.pending.push(text_msg("user", "q2"));
 
-        m.truncate_pending();
+        // switch() truncates pending at the first non-user message.
+        m.switch("s1").unwrap();
 
         // Truncated at the first non-user message, so the trailing user message is dropped too.
         assert_eq!(m.pending.len(), 1, "pending is truncated at the first non-user message");
@@ -526,15 +566,14 @@ mod tests {
             assert!(ids.iter().any(|id| id == "day-0"), "router should load under the initial id; got {ids:?}");
         }
 
-        // new() also arms the switching flag for the initial active session. The first
-        // on_message_start finalizes that switch; reload() only runs on later, non-switching
-        // turns — which is also when the router is consulted (active becomes None via the
-        // switch tool, which does not arm switching).
+        // new() binds the initial active session directly (active = Some), so on_message_start
+        // takes the reload() branch every turn: whenever the resolved id has rolled over it
+        // reloads the router under the fresh id rather than reusing the stale one.
         let view = mux.lock().unwrap().messages().cloned().collect::<Vec<_>>();
         ext.on_message_start(view).await.unwrap();
 
-        // A later turn: the resolver now yields a fresh id, so on_message_start must reload
-        // the router under "day-1" instead of reusing the stale "day-0" session.
+        // The resolver yields a fresh id each turn, so this on_message_start reloads the
+        // router again under the next rolled-over id.
         let view = mux.lock().unwrap().messages().cloned().collect::<Vec<_>>();
         ext.on_message_start(view).await.unwrap();
 
@@ -594,7 +633,7 @@ mod tests {
 
     #[tokio::test]
     async fn execute_to_active_switches_session() {
-        let (mux, _, tool) = make_mux();
+        let (mux, mut ext, tool) = make_mux();
         {
             let mut m = mux.lock().unwrap();
             m.active = None; // start in routing session
@@ -604,10 +643,21 @@ mod tests {
         let result = tool.execute(rx, serde_json::json!({"next_id": "s2"})).await.unwrap();
 
         assert!(!result.is_error);
+
+        // execute arms a deferred switch; it does not bind until on_message_start runs.
+        {
+            let m = mux.lock().unwrap();
+            assert!(m.active.is_none(), "execute defers binding to on_message_start");
+            assert_eq!(switch_target(&m).as_deref(), Some("s2"), "control carries the next active id");
+        }
+
+        // on_message_start realizes the deferred switch.
+        let view = mux.lock().unwrap().messages().cloned().collect::<Vec<_>>();
+        ext.on_message_start(view).await.unwrap();
+
         let m = mux.lock().unwrap();
-        assert!(m.active.is_some(), "should switch into an active session");
+        assert!(m.active.is_some(), "on_message_start should bind the active session");
         assert_eq!(m.active.as_ref().unwrap().0, "s2");
-        assert!(m.switching, "router→active switch should arm the switching flag for on_message_start");
     }
 
     // --- E2E test ---
