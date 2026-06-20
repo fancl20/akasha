@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use uuid::Uuid;
 
 use crate::core::agent::AgentState;
-use crate::core::extensions::{Extension, ExtensionError};
+use crate::core::extensions::{Extension, ExtensionError, ToolCallDecision};
 use crate::core::session::{Session, SessionError};
 use crate::core::tools::{ToolError, ToolHandler};
 use crate::core::types::{ContentBlock, Message, TextContent, ToolDefinition, ToolResult, ToolResultContent};
@@ -245,6 +245,20 @@ impl Extension for MuxExtension {
         mux.flush()
             .map_err(|e| ExtensionError::ExtensionFailed { name: "session/mux".to_string(), message: e.to_string() })?;
         Ok(state)
+    }
+
+    async fn on_tool_execution_start(
+        &mut self,
+        _tool_call_id: &str,
+        name: &str,
+        _args: &serde_json::Value,
+    ) -> Result<ToolCallDecision, ExtensionError> {
+        if self.session.lock().unwrap().active.is_none() && name != "session-mux-switch" {
+            return Ok(ToolCallDecision::Deny(format!(
+                "no active session is bound (routing). Call 'session-mux-switch' to select or create a session before using '{name}'."
+            )));
+        }
+        Ok(ToolCallDecision::Allow)
     }
 }
 
@@ -658,6 +672,39 @@ mod tests {
         let m = mux.lock().unwrap();
         assert!(m.active.is_some(), "on_message_start should bind the active session");
         assert_eq!(m.active.as_ref().unwrap().0, "s2");
+    }
+
+    #[tokio::test]
+    async fn routing_rejects_non_switch_tools() {
+        let (mux, mut ext, _) = make_mux();
+        {
+            let mut m = mux.lock().unwrap();
+            m.active = None; // routing state: no active session bound
+        }
+
+        // Any tool other than session-mux-switch must be denied while routing.
+        let decision = ext.on_tool_execution_start("c1", "tavily_extract", &serde_json::json!({})).await.unwrap();
+        match decision {
+            ToolCallDecision::Deny(reason) => {
+                assert!(
+                    reason.contains("session-mux-switch"),
+                    "deny reason should point at the switch tool, got: {reason}"
+                );
+            }
+            ToolCallDecision::Allow => panic!("non-switch tool must be denied while routing"),
+        }
+
+        // session-mux-switch stays allowed so the router can select or create a session.
+        let decision = ext.on_tool_execution_start("c2", "session-mux-switch", &serde_json::json!({})).await.unwrap();
+        assert!(matches!(decision, ToolCallDecision::Allow), "session-mux-switch must be allowed while routing");
+    }
+
+    #[tokio::test]
+    async fn active_allows_all_tools() {
+        let (_mux, mut ext, _) = make_mux();
+        // An active session is bound by default; arbitrary tools are allowed.
+        let decision = ext.on_tool_execution_start("c1", "tavily_extract", &serde_json::json!({})).await.unwrap();
+        assert!(matches!(decision, ToolCallDecision::Allow), "tools must be allowed when a session is active");
     }
 
     // --- E2E test ---
