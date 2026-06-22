@@ -19,6 +19,10 @@ pub enum ToolError {
 pub trait ToolHandler: Send + Sync {
     fn definition(&self) -> ToolDefinition;
 
+    fn schema(&self) -> (serde_json::Value, Option<serde_json::Value>) {
+        (self.definition().parameters, None)
+    }
+
     async fn execute(
         &self,
         cancel: futures::channel::oneshot::Receiver<bool>,
@@ -53,6 +57,21 @@ impl ToolRegistry {
 
     pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools.values().map(|h| h.definition()).collect()
+    }
+
+    pub fn schemas(&self) -> HashMap<String, (serde_json::Value, Option<serde_json::Value>)> {
+        self.tools.values().map(|h| (h.definition().name, h.schema())).collect()
+    }
+
+    pub fn subset(&self, allowed: &[String]) -> ToolRegistry {
+        ToolRegistry {
+            tools: self
+                .tools
+                .iter()
+                .filter(|(name, _)| allowed.contains(*name))
+                .map(|(name, handler)| (name.clone(), handler.clone()))
+                .collect(),
+        }
     }
 }
 

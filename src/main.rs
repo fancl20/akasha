@@ -11,7 +11,7 @@ use akasha::core::tools::ToolRegistry;
 use akasha::core::types::{ContentBlock, Message, TextContent};
 use akasha::extra::extensions::telegram;
 use akasha::extra::providers::deepseek::DeepSeekProvider;
-use akasha::extra::sessions::mux::session::MuxSession;
+use akasha::extra::sessions::mux::MuxSession;
 use akasha::extra::sessions::sqlite::SqliteSession;
 use akasha::extra::tools::mcp;
 use chrono::{Duration, Local};
