@@ -23,8 +23,10 @@ pub type SessionFactory = Arc<dyn Fn() -> anyhow::Result<Arc<Mutex<dyn Session>>
 /// conversation context, isolated from the parent's own session.
 #[async_trait]
 pub trait Subagent: Send + Sync {
-    /// Tool definition surfaced to the parent agent's model.
     fn definition(&self) -> ToolDefinition;
+    fn schema(&self) -> (serde_json::Value, Option<serde_json::Value>) {
+        (self.definition().parameters, None)
+    }
 
     /// Run the subagent to completion inside `session`.
     ///
@@ -74,6 +76,10 @@ impl SubagentTool {
 impl ToolHandler for SubagentTool {
     fn definition(&self) -> ToolDefinition {
         self.subagent.definition()
+    }
+
+    fn schema(&self) -> (serde_json::Value, Option<serde_json::Value>) {
+        self.subagent.schema()
     }
 
     async fn execute(

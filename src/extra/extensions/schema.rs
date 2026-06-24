@@ -221,7 +221,11 @@ mod tests {
         fn schema(&self) -> (serde_json::Value, Option<serde_json::Value>) {
             (self.def.parameters.clone(), self.output.clone())
         }
-        async fn execute(&self, _cancel: oneshot::Receiver<bool>, _params: serde_json::Value) -> Result<ToolResult, ToolError> {
+        async fn execute(
+            &self,
+            _cancel: oneshot::Receiver<bool>,
+            _params: serde_json::Value,
+        ) -> Result<ToolResult, ToolError> {
             Ok(ToolResult {
                 tool_call_id: None,
                 content: vec![ToolResultContent::Text(TextContent { content: self.result_text.clone() })],
@@ -261,11 +265,7 @@ mod tests {
     #[tokio::test]
     async fn records_schemas_at_turn_start() {
         let tools = registry_with(SchemedTool {
-            def: ToolDefinition {
-                name: "t".into(),
-                description: "d".into(),
-                parameters: input_schema(),
-            },
+            def: ToolDefinition { name: "t".into(), description: "d".into(), parameters: input_schema() },
             output: Some(output_schema()),
             result_text: r#"{"x":1}"#.into(),
         });
@@ -279,11 +279,7 @@ mod tests {
     #[tokio::test]
     async fn denies_invalid_input() {
         let tools = registry_with(SchemedTool {
-            def: ToolDefinition {
-                name: "t".into(),
-                description: "d".into(),
-                parameters: input_schema(),
-            },
+            def: ToolDefinition { name: "t".into(), description: "d".into(), parameters: input_schema() },
             output: None,
             result_text: "ok".into(),
         });
@@ -300,11 +296,7 @@ mod tests {
     #[tokio::test]
     async fn allows_valid_input() {
         let tools = registry_with(SchemedTool {
-            def: ToolDefinition {
-                name: "t".into(),
-                description: "d".into(),
-                parameters: input_schema(),
-            },
+            def: ToolDefinition { name: "t".into(), description: "d".into(), parameters: input_schema() },
             output: None,
             result_text: "ok".into(),
         });
@@ -403,7 +395,11 @@ mod tests {
     async fn resnapshots_each_turn() {
         // Start with one tool, then swap the registry for two tools and confirm turn_start picks it up.
         let one = registry_with(SchemedTool {
-            def: ToolDefinition { name: "a".into(), description: "d".into(), parameters: serde_json::json!({"type":"object"}) },
+            def: ToolDefinition {
+                name: "a".into(),
+                description: "d".into(),
+                parameters: serde_json::json!({"type":"object"}),
+            },
             output: None,
             result_text: "ok".into(),
         });
@@ -416,7 +412,11 @@ mod tests {
             let mut r = ToolRegistry::new();
             r.register(
                 SchemedTool {
-                    def: ToolDefinition { name: "a".into(), description: "d".into(), parameters: serde_json::json!({"type":"object"}) },
+                    def: ToolDefinition {
+                        name: "a".into(),
+                        description: "d".into(),
+                        parameters: serde_json::json!({"type":"object"}),
+                    },
                     output: None,
                     result_text: "ok".into(),
                 }
@@ -424,7 +424,11 @@ mod tests {
             );
             r.register(
                 SchemedTool {
-                    def: ToolDefinition { name: "b".into(), description: "d".into(), parameters: serde_json::json!({"type":"object"}) },
+                    def: ToolDefinition {
+                        name: "b".into(),
+                        description: "d".into(),
+                        parameters: serde_json::json!({"type":"object"}),
+                    },
                     output: None,
                     result_text: "ok".into(),
                 }
@@ -466,7 +470,12 @@ mod tests {
                 if msg.content.iter().any(|b| matches!(b, ContentBlock::ToolCall(_))) { "tool_calls" } else { "stop" };
             Ok(Box::pin(stream::iter(vec![StreamResponse {
                 message: msg,
-                usage: TokenUsage { input_tokens: 0, output_tokens: 0, cache_read_tokens: None, cache_write_tokens: None },
+                usage: TokenUsage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                },
                 stop_reason: Some(stop.to_string()),
             }])))
         }
@@ -512,7 +521,10 @@ mod tests {
         // skill/handler never runs (its scripted result queue stays untouched).
         let provider = Arc::new(ScriptedProvider::new(vec![
             tool_call_msg("c1", "t", serde_json::json!({})),
-            Message { role: "assistant".to_string(), content: vec![ContentBlock::Text(TextContent { content: "done".into() })] },
+            Message {
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::Text(TextContent { content: "done".into() })],
+            },
         ]));
         let tools = registry_with(SchemedTool {
             def: ToolDefinition { name: "t".into(), description: "d".into(), parameters: input_schema() },
@@ -520,11 +532,7 @@ mod tests {
             result_text: "should-not-run".into(),
         });
 
-        let mut agent = Agent {
-            state: state(tools),
-            provider,
-            extension: Box::new(SchemaVerification::new()),
-        };
+        let mut agent = Agent { state: state(tools), provider, extension: Box::new(SchemaVerification::new()) };
         agent.prompt(user_text("go")).await.unwrap();
 
         let (is_error, text) = last_tool_result_text(&agent.state.session).expect("a tool result was recorded");
@@ -537,19 +545,22 @@ mod tests {
         // Tool returns output that violates its output schema; the extension converts it to an error.
         let provider = Arc::new(ScriptedProvider::new(vec![
             tool_call_msg("c1", "t", serde_json::json!({})),
-            Message { role: "assistant".to_string(), content: vec![ContentBlock::Text(TextContent { content: "done".into() })] },
+            Message {
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::Text(TextContent { content: "done".into() })],
+            },
         ]));
         let tools = registry_with(SchemedTool {
-            def: ToolDefinition { name: "t".into(), description: "d".into(), parameters: serde_json::json!({"type":"object"}) },
+            def: ToolDefinition {
+                name: "t".into(),
+                description: "d".into(),
+                parameters: serde_json::json!({"type":"object"}),
+            },
             output: Some(output_schema()),
             result_text: r#"{"x":"bad"}"#.into(),
         });
 
-        let mut agent = Agent {
-            state: state(tools),
-            provider,
-            extension: Box::new(SchemaVerification::new()),
-        };
+        let mut agent = Agent { state: state(tools), provider, extension: Box::new(SchemaVerification::new()) };
         agent.prompt(user_text("go")).await.unwrap();
 
         let (is_error, text) = last_tool_result_text(&agent.state.session).expect("a tool result was recorded");
@@ -561,7 +572,10 @@ mod tests {
     async fn e2e_valid_io_runs_cleanly() {
         let provider = Arc::new(ScriptedProvider::new(vec![
             tool_call_msg("c1", "t", serde_json::json!({"path":"/tmp"})),
-            Message { role: "assistant".to_string(), content: vec![ContentBlock::Text(TextContent { content: "done".into() })] },
+            Message {
+                role: "assistant".to_string(),
+                content: vec![ContentBlock::Text(TextContent { content: "done".into() })],
+            },
         ]));
         let tools = registry_with(SchemedTool {
             def: ToolDefinition { name: "t".into(), description: "d".into(), parameters: input_schema() },
@@ -569,11 +583,7 @@ mod tests {
             result_text: r#"{"x":5}"#.into(),
         });
 
-        let mut agent = Agent {
-            state: state(tools),
-            provider,
-            extension: Box::new(SchemaVerification::new()),
-        };
+        let mut agent = Agent { state: state(tools), provider, extension: Box::new(SchemaVerification::new()) };
         agent.prompt(user_text("go")).await.unwrap();
 
         let (is_error, _text) = last_tool_result_text(&agent.state.session).expect("a tool result was recorded");
