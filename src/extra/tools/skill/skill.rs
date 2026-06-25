@@ -233,7 +233,7 @@ pub fn register(
     base_tools: ToolRegistry,
     session_factory: SessionFactory,
 ) -> Result<(), config::SkillError> {
-    for skill in config::discover(&config.skills_dir)? {
+    for skill in config::discover(&config.dir)? {
         let label = skill.dir.display().to_string();
         let tool = match SkillTool::new(model.clone(), provider.clone(), base_tools.clone(), skill) {
             Ok(t) => t,
@@ -619,10 +619,7 @@ mod tests {
         let (_g, skill) = make_skill("s", None, Some(OUT_SCHEMA));
         let (result, _) = run(
             skill,
-            vec![
-                assistant_tool_call(SUBMIT_TOOL, serde_json::json!({"x": "not-an-int"})),
-                assistant_text("I give up"),
-            ],
+            vec![assistant_tool_call(SUBMIT_TOOL, serde_json::json!({"x": "not-an-int"})), assistant_text("I give up")],
             serde_json::json!({"input": "go"}),
         )
         .await;
@@ -658,7 +655,7 @@ mod tests {
             .unwrap();
         let guard = TempDir(dir.clone());
 
-        let cfg = SkillConfig { skills_dir: dir };
+        let cfg = SkillConfig { dir };
         let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::new(vec![]));
         let mut registry = ToolRegistry::new();
         register(&mut registry, &cfg, model(), provider, base_tools(), Arc::new(|| Ok(InMemorySession::new().arc())))

@@ -54,7 +54,7 @@ pub struct ParsedSkill {
 /// `SKILL.md` is registered as one skill.
 #[derive(Debug, Clone)]
 pub struct SkillConfig {
-    pub skills_dir: PathBuf,
+    pub dir: PathBuf,
 }
 
 #[derive(Debug, thiserror::Error)]

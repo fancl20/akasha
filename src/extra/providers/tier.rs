@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -67,16 +68,10 @@ impl Provider for TierProvider {
             return self.inner.stream(model, messages, tools).await;
         }
         if self.tiers.is_empty() {
-            return Err(ProviderError::RequestFailed(format!(
-                "no tiers configured for tier provider '{}'",
-                self.name
-            )));
+            return Err(ProviderError::RequestFailed(format!("no tiers configured for tier provider '{}'", self.name)));
         }
         // "0" -> tiers[0] (best), "1" -> tiers[1], ...; non-numeric ids are unknown tiers.
-        let requested = model
-            .id
-            .parse::<usize>()
-            .map_err(|_| ProviderError::ModelNotFound(model.id.clone()))?;
+        let requested = model.id.parse::<usize>().map_err(|_| ProviderError::ModelNotFound(model.id.clone()))?;
         // Clamp to the last tier when the requested index runs past the end.
         let index = requested.min(self.tiers.len() - 1);
         let target = &self.tiers[index];
@@ -85,6 +80,16 @@ impl Provider for TierProvider {
 
     fn name(&self) -> &str {
         &self.name
+    }
+}
+
+pub fn tier(index: usize) -> Model {
+    Model {
+        id: index.to_string(),
+        provider: String::new(),
+        context_window: 0,
+        base_url: String::new(),
+        headers: HashMap::new(),
     }
 }
 
@@ -186,11 +191,8 @@ mod tests {
     #[tokio::test]
     async fn non_empty_provider_bypasses_tier_selection() {
         let seen = Arc::new(Mutex::new(Vec::new()));
-        let tp = TierProvider::new(
-            "tier",
-            vec![target_model("back", "tier-model")],
-            vec![("back", backend(seen.clone()))],
-        );
+        let tp =
+            TierProvider::new("tier", vec![target_model("back", "tier-model")], vec![("back", backend(seen.clone()))]);
 
         // The caller addresses the backend directly: model.id is the real model id and
         // model.provider names the backend. Tier selection is skipped and the model is
@@ -213,7 +215,11 @@ mod tests {
         // No backends registered, but a tier exists. A bypass request names a provider
         // nobody knows: it must surface the virtual provider's error rather than be
         // reinterpreted as tier selection.
-        let tp = TierProvider::new("tier", vec![target_model("back", "tier-model")], Vec::<(&str, Arc<dyn Provider>)>::new());
+        let tp = TierProvider::new(
+            "tier",
+            vec![target_model("back", "tier-model")],
+            Vec::<(&str, Arc<dyn Provider>)>::new(),
+        );
 
         let direct = Model {
             id: "direct-model".to_string(),
@@ -225,7 +231,6 @@ mod tests {
         let result = tp.stream(&direct, Box::new(std::iter::empty::<&Message>()), &vec![]).await;
         assert!(matches!(result, Err(ProviderError::RequestFailed(_))));
     }
-
 
     #[tokio::test]
     async fn out_of_range_index_clamps_to_last_tier() {

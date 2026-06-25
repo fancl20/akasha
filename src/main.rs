@@ -4,16 +4,16 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use akasha::core::agent::{Agent, AgentState};
-use akasha::core::extensions::NoopExtension;
 use akasha::core::providers::{Model, Provider};
 use akasha::core::session::{InMemorySession, Session};
 use akasha::core::tools::ToolRegistry;
 use akasha::core::types::{ContentBlock, Message, TextContent};
-use akasha::extra::extensions::telegram;
+use akasha::extra::extensions::{circuit_breaker::CircuitBreaker, combinator::And, schema::SchemaVerification, telegram};
 use akasha::extra::providers::deepseek::DeepSeekProvider;
+use akasha::extra::providers::tier::{TierProvider, tier};
 use akasha::extra::sessions::mux::MuxSession;
 use akasha::extra::sessions::sqlite::SqliteSession;
-use akasha::extra::tools::mcp;
+use akasha::extra::tools::{mcp, skill};
 use chrono::{Duration, Local};
 use clap::Parser;
 
@@ -32,6 +32,8 @@ struct Cli {
     allowed_ids: Vec<u64>,
     #[arg(long)]
     mcps: Option<String>,
+    #[arg(long)]
+    skills: Option<PathBuf>,
 
     #[arg(long, env = "DEEPSEEK_API_KEY", hide_env_values = true)]
     deepseek: Option<String>,
@@ -55,18 +57,30 @@ async fn main() {
 
     let provider = cli.provider.expect("provider is required");
     let api_key = cli.api_key.expect("api_key is required");
-    let base_url = cli.base_url;
+    let base_url = cli.base_url.unwrap_or_default();
 
-    let model = Model {
-        id: "deepseek-v4-pro".into(),
-        provider: provider,
-        context_window: 384_000,
-        base_url: base_url.unwrap_or_default(),
-        headers: HashMap::from([("reasoning_effort".into(), "max".into())]),
-    };
-    let provider: Arc<dyn Provider> = Arc::new(DeepSeekProvider::new(api_key));
+    let provider: Arc<dyn Provider> = Arc::new(TierProvider::new(
+        "tier",
+        vec![
+            Model {
+                id: "deepseek-v4-pro".into(),
+                provider: provider.clone(),
+                context_window: 1_048_576,
+                base_url: base_url.clone(),
+                headers: HashMap::from([("reasoning_effort".into(), "max".into())]),
+            },
+            Model {
+                id: "deepseek-v4-flash".into(),
+                provider: provider.clone(),
+                context_window: 1_048_576,
+                base_url: base_url.clone(),
+                headers: HashMap::from([("reasoning_effort".into(), "max".into())]),
+            },
+        ],
+        [("deepseek", Arc::new(DeepSeekProvider::new(api_key)) as Arc<dyn Provider>)],
+    ));
 
-    let mut tools = ToolRegistry::new();
+    let mut base_tools = ToolRegistry::new();
     if let Some(mcps_path) = &cli.mcps {
         let raw = std::fs::read_to_string(mcps_path).expect("failed to read mcps config");
         let cfg: mcp::config::McpConfig = serde_json::from_str(&raw).expect("failed to parse mcps config");
@@ -74,10 +88,18 @@ async fn main() {
             let server = entry.into_config().unwrap_or_else(|e| {
                 panic!("invalid config for mcp server '{name}': {e}");
             });
-            mcp::register(&mut tools, &server)
+            mcp::register(&mut base_tools, &server)
                 .await
                 .unwrap_or_else(|e| panic!("failed to connect to mcp server '{name}': {e}"));
         }
+    }
+
+    let mut tools = ToolRegistry::new();
+    if let Some(dir) = &cli.skills {
+        let config = skill::SkillConfig { dir: dir.clone() };
+        let session_factory = Arc::new(|| Ok(InMemorySession::new().arc()));
+        skill::register(&mut tools, &config, tier(1), provider.clone(), base_tools, session_factory)
+            .unwrap_or_else(|e| panic!("failed to register skills from '{}': {e}", dir.display()));
     }
 
     let allowed_ids: HashSet<u64> = cli.allowed_ids.into_iter().collect();
@@ -114,13 +136,13 @@ async fn main() {
                     tools.register(Box::new(tool));
                     let mux: Arc<Mutex<dyn Session>> = mux;
 
-                    (mux, ext.into(), tools)
+                    (mux, And::new(SchemaVerification::new(), And::new(CircuitBreaker::new(), ext)).into(), tools)
                 }
-                None => (InMemorySession::new().arc(), NoopExtension.into(), tools.clone()),
+                None => (InMemorySession::new().arc(), And::new(SchemaVerification::new(), CircuitBreaker::new()).into(), tools.clone()),
             };
 
             Ok(Agent {
-                state: AgentState { model: model.clone(), tools: tools, session },
+                state: AgentState { model: tier(0), tools: tools, session },
                 provider: provider.clone(),
                 extension,
             })

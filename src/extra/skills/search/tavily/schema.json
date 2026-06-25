@@ -1,0 +1,38 @@
+{
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "query": {
+        "type": "string",
+        "description": "What to search for, in natural language."
+      },
+      "search_id": {
+        "type": "string",
+        "description": "The search_id returned by a previous call, to continue that same search thread in its existing context (so sources already found are not fetched again). Omit to start a fresh search."
+      }
+    },
+    "required": ["query"]
+  },
+  "outputSchema": {
+    "type": "object",
+    "properties": {
+      "results": {
+        "type": "array",
+        "description": "Sources relevant to the query.",
+        "items": {
+          "type": "object",
+          "properties": {
+            "url": { "type": "string", "description": "Source URL." },
+            "content": {
+              "type": "array",
+              "items": { "type": "string" },
+              "description": "Verbatim passages from the source that may be useful."
+            }
+          },
+          "required": ["url", "content"]
+        }
+      }
+    },
+    "required": ["results"]
+  }
+}
