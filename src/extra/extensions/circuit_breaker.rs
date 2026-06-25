@@ -81,7 +81,7 @@ impl Extension for CircuitBreaker {
         result.content = vec![
             ToolResultContent::Text(TextContent { content: clipped }),
             ToolResultContent::Text(TextContent {
-                content: "[MAX_OUTPUT_LENGTH: output exceeded and was clipped]".to_string(),
+                content: "\n[MAX_OUTPUT_LENGTH: output exceeded and was clipped]".to_string(),
             }),
         ];
         result.is_error = true;
