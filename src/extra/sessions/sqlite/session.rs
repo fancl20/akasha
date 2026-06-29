@@ -18,6 +18,7 @@ fn session_err(e: impl std::fmt::Display) -> SessionError {
     SessionError::Failed { message: e.to_string() }
 }
 
+// load requires lock held by caller.
 fn load(conn: &Connection, tail_id: Option<i64>) -> Result<Vec<Message>, SessionError> {
     let mut messages = Vec::new();
     let mut iter_id = tail_id;
@@ -68,10 +69,7 @@ impl SqliteSession {
 
     pub fn get(&self, ref_name: &str) -> Result<Self, SessionError> {
         let db = self.db.lock().unwrap();
-        let tail_id = self
-            .db
-            .lock()
-            .unwrap()
+        let tail_id = db
             .query_row("SELECT tail FROM refs WHERE ref = ?1", [&ref_name], |row| row.get::<_, i64>(0))
             .map_err(|e| match e {
                 rusqlite::Error::QueryReturnedNoRows => {
@@ -85,7 +83,7 @@ impl SqliteSession {
 }
 
 impl Session for SqliteSession {
-    fn messages(&self) -> Box<dyn Iterator<Item = &Message> + '_> {
+    fn messages(&self) -> Box<dyn DoubleEndedIterator<Item = &Message> + '_> {
         Box::new(self.messages.iter())
     }
 

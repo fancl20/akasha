@@ -84,7 +84,7 @@ impl Session for MuxSession {
         Ok(())
     }
 
-    fn messages(&self) -> Box<dyn Iterator<Item = &Message> + '_> {
+    fn messages(&self) -> Box<dyn DoubleEndedIterator<Item = &Message> + '_> {
         match self.active.as_ref() {
             Some(session) => Box::new(session.1.messages().chain(self.pending.iter())),
             None => Box::new(

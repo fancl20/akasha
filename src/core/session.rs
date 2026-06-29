@@ -10,7 +10,7 @@ pub enum SessionError {
 
 pub trait Session: Send + Sync {
     fn append(&mut self, message: Message) -> Result<(), SessionError>;
-    fn messages(&self) -> Box<dyn Iterator<Item = &Message> + '_>;
+    fn messages(&self) -> Box<dyn DoubleEndedIterator<Item = &Message> + '_>;
     fn arc(self) -> Arc<Mutex<dyn Session>>
     where
         Self: Sized + 'static,
@@ -30,7 +30,7 @@ impl InMemorySession {
 }
 
 impl Session for InMemorySession {
-    fn messages(&self) -> Box<dyn Iterator<Item = &Message> + '_> {
+    fn messages(&self) -> Box<dyn DoubleEndedIterator<Item = &Message> + '_> {
         Box::new(self.messages.iter())
     }
 

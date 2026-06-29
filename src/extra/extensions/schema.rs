@@ -496,7 +496,7 @@ mod tests {
     }
 
     fn last_tool_result_text(session: &Arc<Mutex<dyn crate::core::session::Session>>) -> Option<(bool, String)> {
-        for m in session.lock().unwrap().messages().collect::<Vec<_>>().into_iter().rev() {
+        for m in session.lock().unwrap().messages().rev() {
             for block in &m.content {
                 if let ContentBlock::ToolResult(r) = block {
                     let text = r
