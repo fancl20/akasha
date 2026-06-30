@@ -50,8 +50,10 @@ pub struct ParsedSkill {
     pub body: String,
 }
 
-/// Where to look for skills: every subdirectory of `skills_dir` containing a
-/// `SKILL.md` is registered as one skill.
+/// Where to look for skills. Discovery walks `dir` recursively: any directory
+/// (at any depth) that directly contains a `SKILL.md` is registered as one
+/// skill, so layouts like `skills/search/tavily/SKILL.md` work as well as flat
+/// ones like `skills/tavily/SKILL.md`.
 #[derive(Debug, Clone)]
 pub struct SkillConfig {
     pub dir: PathBuf,
@@ -137,77 +139,85 @@ fn validate(fm: &SkillFrontmatter) -> Result<(), SkillError> {
     Ok(())
 }
 
-/// Scans `dir` for skill subdirectories (each containing a `SKILL.md`) and
-/// returns the valid ones. A missing `dir` is not an error — it yields an empty
-/// list. Malformed skills are skipped with a warning on stderr so one bad skill
-/// cannot prevent the rest from loading.
+/// Recursively scans `dir` for skills and returns the valid ones. A skill is any
+/// directory (at any depth) that directly contains a `SKILL.md`; discovery
+/// descends into ordinary directories but stops at a skill's own directory, so a
+/// skill's bundled assets are never mistaken for further skills. A missing `dir`
+/// is not an error — it yields an empty list. Malformed skills are skipped with a
+/// warning on stderr so one bad skill cannot prevent the rest from loading.
 pub fn discover(dir: &Path) -> Result<Vec<ParsedSkill>, SkillError> {
     let mut out = Vec::new();
-    let read_dir = match std::fs::read_dir(dir) {
-        Ok(rd) => rd,
+    match std::fs::read_dir(dir) {
+        Ok(_) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(out),
         Err(e) => return Err(SkillError::Io(e)),
-    };
-
-    for entry in read_dir {
-        let entry = entry.map_err(SkillError::Io)?;
-        let dir_path = entry.path();
-        if !dir_path.is_dir() {
-            continue;
-        }
-
-        let dir_name = match dir_path.file_name().and_then(|n| n.to_str()) {
-            Some(n) => n,
-            None => continue,
-        };
-        let skill_md = dir_path.join("SKILL.md");
-
-        let content = match std::fs::read_to_string(&skill_md) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("[skill] skipping {}: cannot read SKILL.md ({e})", dir_path.display());
-                continue;
-            }
-        };
-
-        let (frontmatter, body) = match parse(&content) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("[skill] skipping {}: {e}", dir_path.display());
-                continue;
-            }
-        };
-
-        if frontmatter.name != dir_name {
-            eprintln!(
-                "[skill] skipping {}: frontmatter name '{}' must match directory '{dir_name}'",
-                dir_path.display(),
-                frontmatter.name
-            );
-            continue;
-        }
-
-        out.push(ParsedSkill { frontmatter, dir: dir_path, body });
     }
-
+    discover_into(dir, &mut out)?;
     Ok(out)
 }
 
-/// The default output schema a skill's `akasha_skill_submit` tool exposes when
-/// the skill declares no `outputSchema`: a single free-text `result` string.
-/// Every skill must hand its result back through the submit tool, so a skill
-/// with no declared output schema still needs a parameter shape to call it with.
-pub(crate) fn default_output_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "properties": {
-            "result": {
-                "type": "string",
-                "description": "The skill's result, as free text."
-            }
-        },
-        "required": ["result"]
-    })
+/// Recursive step of [`discover`]. If `dir` directly owns a `SKILL.md`, it is a
+/// skill: register it and stop (its contents are skill assets, not further
+/// skills). Otherwise descend into each subdirectory, sorted for deterministic
+/// registration order.
+fn discover_into(dir: &Path, out: &mut Vec<ParsedSkill>) -> Result<(), SkillError> {
+    if dir.join("SKILL.md").exists() {
+        register_one(dir, out);
+        return Ok(());
+    }
+
+    let mut subdirs: Vec<PathBuf> = match std::fs::read_dir(dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(SkillError::Io(e)),
+    };
+    subdirs.sort();
+
+    for subdir in subdirs {
+        discover_into(&subdir, out)?;
+    }
+    Ok(())
+}
+
+/// Parses and validates a single skill directory (which must contain a
+/// `SKILL.md`), pushing it onto `out` or logging a skip warning on failure.
+fn register_one(dir_path: &Path, out: &mut Vec<ParsedSkill>) {
+    let dir_name = match dir_path.file_name().and_then(|n| n.to_str()) {
+        Some(n) => n,
+        None => return,
+    };
+    let skill_md = dir_path.join("SKILL.md");
+
+    let content = match std::fs::read_to_string(&skill_md) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("[skill] skipping {}: cannot read SKILL.md ({e})", dir_path.display());
+            return;
+        }
+    };
+
+    let (frontmatter, body) = match parse(&content) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[skill] skipping {}: {e}", dir_path.display());
+            return;
+        }
+    };
+
+    if frontmatter.name != dir_name {
+        eprintln!(
+            "[skill] skipping {}: frontmatter name '{}' must match directory '{dir_name}'",
+            dir_path.display(),
+            frontmatter.name
+        );
+        return;
+    }
+
+    out.push(ParsedSkill { frontmatter, dir: dir_path.to_path_buf(), body });
 }
 
 /// The default argument schema a skill tool exposes when it declares no
@@ -329,6 +339,57 @@ mod tests {
     fn discover_missing_dir_is_empty() {
         let skills = discover(Path::new("/nonexistent/akasha-skill-dir-xyz")).unwrap();
         assert!(skills.is_empty());
+    }
+
+    /// Removes the wrapped directory tree on drop (best-effort).
+    struct TempDir(PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Writes a `SKILL.md` into `root/.../segments`, creating parents as needed.
+    fn write_skill(root: &Path, segments: &[&str]) {
+        let dir = segments.iter().fold(root.to_path_buf(), |acc, s| acc.join(s));
+        std::fs::create_dir_all(&dir).unwrap();
+        let name = *segments.last().unwrap();
+        std::fs::write(dir.join("SKILL.md"), format!("---\nname: {name}\ndescription: d\n---\nbody\n")).unwrap();
+    }
+
+    #[test]
+    fn discover_finds_nested_skills() {
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!("akasha-skill-nest-{}-{n}", std::process::id()));
+        // Flat skill, a two-deep skill, and a three-deep skill.
+        write_skill(&root, &["flat"]);
+        write_skill(&root, &["search", "tavily"]);
+        write_skill(&root, &["search", "web", "bing"]);
+        let guard = TempDir(root.clone());
+
+        let skills = discover(&root).unwrap();
+        let mut names: Vec<&str> = skills.iter().map(|s| s.frontmatter.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["bing", "flat", "tavily"]);
+        // `dir` is the skill's own directory at every depth.
+        assert!(skills.iter().any(|s| s.dir == root.join("search").join("tavily")));
+        drop(guard);
+    }
+
+    #[test]
+    fn discover_does_not_descend_into_a_skill_dir() {
+        // A nested dir *inside* a skill's own directory must not be treated as a
+        // further skill, even if it has a SKILL.md.
+        let n = COUNTER.fetch_add(1, Ordering::SeqCst);
+        let root = std::env::temp_dir().join(format!("akasha-skill-opaque-{}-{n}", std::process::id()));
+        write_skill(&root, &["alpha"]);
+        write_skill(&root, &["alpha", "nested"]); // asset inside alpha, not a skill
+        let guard = TempDir(root.clone());
+
+        let skills = discover(&root).unwrap();
+        let names: Vec<&str> = skills.iter().map(|s| s.frontmatter.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha"], "alpha's bundled dir is opaque");
+        drop(guard);
     }
 
     use std::sync::atomic::{AtomicU64, Ordering};

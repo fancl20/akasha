@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
@@ -9,84 +8,16 @@ use teloxide::sugar::request::RequestLinkPreviewExt;
 use teloxide::types::{ChatAction, ChatId, Message as TgMessage, MessageId, Update, User};
 use teloxide::utils::command::BotCommands;
 use teloxide::{ApiError, Bot, RequestError, dptree};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinSet;
 
-use crate::core::agent::{Agent, AgentState};
-use crate::core::extensions::{Extension, ExtensionError, ToolCallDecision};
-use crate::core::providers::StreamResponse;
+use crate::core::agent::Agent;
 use crate::core::types::{ContentBlock, Message, TextContent};
-use crate::extra::extensions::combinator::And;
+use crate::extra::extensions::io::{IOExtension, OutputEvent};
 
-enum StreamEvent {
-    Append(ContentBlock),
-    Notification(String),
-    Finish(oneshot::Sender<Result<(), ExtensionError>>),
-}
-
-pub struct TelegramExtension {
-    tx: mpsc::UnboundedSender<StreamEvent>,
-    rx: mpsc::UnboundedReceiver<Message>,
-}
-
-#[async_trait]
-impl Extension for TelegramExtension {
-    fn name(&self) -> &str {
-        "telegram"
-    }
-
-    async fn on_message_update(&mut self, chunk: &StreamResponse) -> Result<(), ExtensionError> {
-        for block in &chunk.message.content {
-            self.tx.send(StreamEvent::Append(block.clone())).map_err(|_| ExtensionError::ExtensionFailed {
-                name: "telegram".to_string(),
-                message: "updater task dropped".to_string(),
-            })?;
-        }
-        Ok(())
-    }
-
-    async fn on_tool_execution_start(
-        &mut self,
-        _tool_call_id: &str,
-        name: &str,
-        args: &serde_json::Value,
-    ) -> Result<ToolCallDecision, ExtensionError> {
-        let notification = format!("{name}: {args}");
-        self.tx.send(StreamEvent::Notification(notification)).map_err(|_| ExtensionError::ExtensionFailed {
-            name: "telegram".to_string(),
-            message: "updater task dropped".to_string(),
-        })?;
-        Ok(ToolCallDecision::Allow)
-    }
-
-    async fn on_turn_end(&mut self, state: AgentState) -> Result<AgentState, ExtensionError> {
-        let (tx, rx) = oneshot::channel();
-        self.tx.send(StreamEvent::Finish(tx)).map_err(|_| ExtensionError::ExtensionFailed {
-            name: "telegram".to_string(),
-            message: "updater task dropped".to_string(),
-        })?;
-        let _ = rx.await.map_err(|_| ExtensionError::ExtensionFailed {
-            name: "telegram".to_string(),
-            message: "updater task dropped".to_string(),
-        })?;
-
-        let msg = self.rx.recv().await.ok_or(ExtensionError::ExtensionFailed {
-            name: "telegram".to_string(),
-            message: "input channel dropped".to_string(),
-        })?;
-        state
-            .session
-            .lock()
-            .unwrap()
-            .append(msg)
-            .map_err(|e| ExtensionError::ExtensionFailed { name: "telegram".to_string(), message: e.to_string() })?;
-        Ok(state)
-    }
-}
-
-/// Background task: receives chunks from the channel, batches them,
+/// Background task: receives events from the channel, batches them,
 /// and flushes to Telegram with throttling.
-async fn update_chat(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<StreamEvent>) {
+async fn update_chat(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<OutputEvent>) {
     let mut pending = String::new();
     let mut message_id = None;
     let mut wait_until = SystemTime::UNIX_EPOCH;
@@ -118,13 +49,13 @@ async fn update_chat(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<
 
         let mut finish_tx = None;
         match event {
-            Some(StreamEvent::Append(ContentBlock::Text(t))) => pending.push_str(&t.content),
-            Some(StreamEvent::Append(ContentBlock::Reasoning { .. })) => {} // Allow reasoning event to trigger typing action.
-            Some(StreamEvent::Append(..)) => continue,
-            Some(StreamEvent::Notification(t)) if pending.is_empty() => {
+            Some(OutputEvent::Append(ContentBlock::Text(t))) => pending.push_str(&t.content),
+            Some(OutputEvent::Append(ContentBlock::Reasoning { .. })) => {} // Allow reasoning event to trigger typing action.
+            Some(OutputEvent::Append(..)) => continue,
+            Some(OutputEvent::Notification(t)) if pending.is_empty() => {
                 message_id = update_message(message_id, &t[..t.ceil_char_boundary(512)]).await
             }
-            Some(StreamEvent::Finish(done)) => {
+            Some(OutputEvent::Finish(done)) => {
                 finish_tx = Some(done);
                 pending.push('\n');
                 wait_until = SystemTime::UNIX_EPOCH;
@@ -202,7 +133,7 @@ async fn command_handler(
     dialogue: AgentDialogue,
     msg: TgMessage,
     cmd: Command,
-    agent_factory: AgentFactory,
+    factory: AgentFactory,
 ) -> HandlerResult {
     match cmd {
         Command::Start => {}
@@ -221,24 +152,19 @@ async fn command_handler(
                 role: "user".into(),
                 content: vec![ContentBlock::Text(TextContent { content: format!("switch session: {text}") })],
             };
-            handle_prompt(bot, dialogue, msg, prompt, agent_factory).await?;
+            handle_prompt(bot, dialogue, msg, prompt, factory).await?;
         }
     }
     Ok(())
 }
 
-async fn handle_message(
-    bot: Bot,
-    dialogue: AgentDialogue,
-    msg: TgMessage,
-    agent_factory: AgentFactory,
-) -> HandlerResult {
+async fn handle_message(bot: Bot, dialogue: AgentDialogue, msg: TgMessage, factory: AgentFactory) -> HandlerResult {
     let text = match msg.text() {
         Some(text) => text.to_owned(),
         None => return Ok(()),
     };
     let prompt = Message { role: "user".into(), content: vec![ContentBlock::Text(TextContent { content: text })] };
-    handle_prompt(bot, dialogue, msg, prompt, agent_factory).await
+    handle_prompt(bot, dialogue, msg, prompt, factory).await
 }
 
 /// Drives the agent dialogue with `prompt`, starting a new run when idle or
@@ -248,27 +174,23 @@ async fn handle_prompt(
     dialogue: AgentDialogue,
     msg: TgMessage,
     prompt: Message,
-    agent_factory: AgentFactory,
+    factory: AgentFactory,
 ) -> HandlerResult {
     match dialogue.get_or_default().await? {
         State::Idle => {
-            let (event_tx, event_rx) = mpsc::unbounded_channel();
-            let (msg_tx, msg_rx) = mpsc::unbounded_channel();
-
-            let mut agent = agent_factory(msg.from)?;
-            agent.extension = And::new(agent.extension, TelegramExtension { tx: event_tx, rx: msg_rx }).into();
-
+            let agent = factory(msg.from)?;
+            let (mut agent, tx, rx) = IOExtension::bind(agent);
             let mut tasks = JoinSet::new();
             tasks.spawn(async move {
                 if let Err(e) = agent.prompt(prompt).await {
                     eprintln!("agent prompt error: {e}");
                 }
             });
-            tasks.spawn(update_chat(bot, msg.chat.id, event_rx));
+            tasks.spawn(update_chat(bot, msg.chat.id, rx));
 
-            dialogue.update(State::Running { tasks: Arc::new(Mutex::new(tasks)), tx: msg_tx }).await?;
+            dialogue.update(State::Running { tasks: Arc::new(Mutex::new(tasks)), tx: tx }).await?;
         }
-        State::Running { tasks: _, tx } => {
+        State::Running { tx, .. } => {
             tx.send(prompt)?;
         }
     }
@@ -296,12 +218,12 @@ fn schema(ids: Arc<HashSet<u64>>) -> UpdateHandler<Box<dyn std::error::Error + S
 pub async fn dispatch(
     token: impl Into<String>,
     allowed_ids: HashSet<u64>,
-    agent_factory: AgentFactory,
+    factory: AgentFactory,
 ) -> Result<(), RequestError> {
     let bot = Bot::new(token.into());
     bot.set_my_commands(Command::bot_commands()).await?;
     Dispatcher::builder(bot, schema(Arc::new(allowed_ids)))
-        .dependencies(dptree::deps![InMemStorage::<State>::new(), agent_factory])
+        .dependencies(dptree::deps![InMemStorage::<State>::new(), factory])
         .build()
         .dispatch()
         .await;

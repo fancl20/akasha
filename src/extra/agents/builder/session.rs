@@ -4,8 +4,9 @@
 //! [`SessionManager`] extends [`Session`]: a manager *is* its main session, so
 //! the main conversation is driven directly through `append`/`messages`.
 //! [`fork`](SessionManager::fork) and [`get`](SessionManager::get) return forks
-//! as owned `Box<dyn SessionManager>` — each itself a session (and forkable
-//! again). It has two implementations:
+//! as `Arc<Mutex<dyn Session>>` — drivable sessions the caller can hand
+//! straight to an [`Agent`]. Forks are plain sessions, not managers; only the
+//! root manager creates and reopens them. It has two implementations:
 //!
 //! - [`SqliteSession`] implements it natively: a fork persists a database ref
 //!   named after the UUID, so it survives restarts and `get` reopens it from the
@@ -17,6 +18,7 @@
 //!
 //! [`AgentBuilder`]: super::AgentBuilder
 //! [`SqliteSession`]: crate::extra::sessions::sqlite::SqliteSession
+//! [`Agent`]: crate::core::agent::Agent
 //! [`Session`]: crate::core::session::Session
 
 use std::collections::HashMap;
@@ -32,24 +34,25 @@ use crate::extra::sessions::sqlite::SqliteSession;
 ///
 /// Because [`Session`] is a supertrait, a session manager *is* its main session:
 /// interact with the main conversation through `append`/`messages` directly.
-/// [`fork`](Self::fork) and [`get`](Self::get) return owned
-/// `Box<dyn SessionManager>` values, which are themselves usable as sessions
-/// (the [`Session`] methods are available on them via the supertrait).
+/// [`fork`](Self::fork) and [`get`](Self::get) return `Arc<Mutex<dyn Session>>`
+/// — the forked branch as a drivable session, ready to hand to an
+/// [`Agent`](crate::core::agent::Agent). Forks are plain sessions, not managers;
+/// only the root manager creates and reopens them.
 ///
 /// [`Session`]: crate::core::session::Session
 pub trait SessionManager: Session {
-    fn fork(&mut self) -> Result<(String, Box<dyn SessionManager>), SessionError>;
-    fn get(&self, id: &str) -> Result<Box<dyn SessionManager>, SessionError>;
+    fn fork(&mut self) -> Result<(String, Arc<Mutex<dyn Session>>), SessionError>;
+    fn get(&self, id: &str) -> Result<Arc<Mutex<dyn Session>>, SessionError>;
 }
 
 impl SessionManager for SqliteSession {
-    fn fork(&mut self) -> Result<(String, Box<dyn SessionManager>), SessionError> {
+    fn fork(&mut self) -> Result<(String, Arc<Mutex<dyn Session>>), SessionError> {
         let id = Uuid::now_v7().to_string();
-        Ok((id.clone(), Box::new(SqliteSession::fork(self, &id)?)))
+        Ok((id.clone(), SqliteSession::fork(self, &id)?.arc()))
     }
 
-    fn get(&self, id: &str) -> Result<Box<dyn SessionManager>, SessionError> {
-        Ok(Box::new(SqliteSession::get(self, id)?))
+    fn get(&self, id: &str) -> Result<Arc<Mutex<dyn Session>>, SessionError> {
+        Ok(SqliteSession::get(self, id)?.arc())
     }
 }
 
@@ -76,10 +79,9 @@ type Registry = Arc<Mutex<HashMap<String, Shared>>>;
 /// no lock held across the return.
 ///
 /// [`fork`](Self::fork) snapshots the current messages into a fresh shared
-/// session registered under a UUID; [`get`](Self::get) opens a handle to that
-/// shared session, rebuilding its cache so it reflects appends made through any
-/// other handle. Forks are in-memory only; for persistence use [`SqliteSession`]
-/// directly.
+/// session registered under a UUID and returns it; [`get`](Self::get) returns
+/// that shared session, so it reflects appends made through any other handle.
+/// Forks are in-memory only; for persistence use [`SqliteSession`] directly.
 ///
 /// [`Session`]: crate::core::session::Session
 pub struct SessionAdapter {
@@ -104,7 +106,7 @@ impl SessionAdapter {
     }
 
     /// Build a handle over `backing`, seeding its read-cache from the live
-    /// session and sharing `forks`/`fresh` so the handle is itself forkable.
+    /// session and sharing `forks`/`fresh`.
     fn from_shared(backing: Shared, forks: Registry, fresh: Arc<dyn Fn() -> Shared + Send + Sync>) -> Self {
         let messages = backing.lock().unwrap_or_else(|e| e.into_inner()).messages().cloned().collect();
         Self { backing, messages, forks, fresh }
@@ -126,25 +128,23 @@ impl Session for SessionAdapter {
 }
 
 impl SessionManager for SessionAdapter {
-    fn fork(&mut self) -> Result<(String, Box<dyn SessionManager>), SessionError> {
+    fn fork(&mut self) -> Result<(String, Arc<Mutex<dyn Session>>), SessionError> {
         let id = Uuid::now_v7().to_string();
         let backing: Shared = (self.fresh)();
         for message in &self.messages {
             backing.lock().map_err(|_| poison())?.append(message.clone())?;
         }
         self.forks.lock().map_err(|_| poison())?.insert(id.clone(), backing.clone());
-        Ok((id, Box::new(Self::from_shared(backing, self.forks.clone(), self.fresh.clone()))))
+        Ok((id, backing))
     }
 
-    fn get(&self, id: &str) -> Result<Box<dyn SessionManager>, SessionError> {
-        let backing = self
-            .forks
+    fn get(&self, id: &str) -> Result<Arc<Mutex<dyn Session>>, SessionError> {
+        self.forks
             .lock()
             .map_err(|_| poison())?
             .get(id)
             .cloned()
-            .ok_or_else(|| SessionError::Failed { message: format!("fork not found: {id}") })?;
-        Ok(Box::new(Self::from_shared(backing, self.forks.clone(), self.fresh.clone())))
+            .ok_or_else(|| SessionError::Failed { message: format!("fork not found: {id}") })
     }
 }
 
@@ -162,14 +162,14 @@ mod tests {
         }
     }
 
-    /// Roles of a manager's session — works on any `SessionManager` since
-    /// `Session` is a supertrait (no upcast needed).
-    fn roles(mgr: &dyn SessionManager) -> Vec<String> {
-        mgr.messages().map(|m| m.role.clone()).collect()
+    /// Roles of any session — works on a manager or a forked `Arc<Mutex<dyn
+    /// Session>>` (via a lock), since `Session` exposes `messages` directly.
+    fn roles(s: &dyn Session) -> Vec<String> {
+        s.messages().map(|m| m.role.clone()).collect()
     }
 
-    fn last_text(mgr: &dyn SessionManager) -> Option<String> {
-        mgr.messages().last().and_then(|m| {
+    fn last_text(s: &dyn Session) -> Option<String> {
+        s.messages().last().and_then(|m| {
             m.content.iter().find_map(|b| match b {
                 ContentBlock::Text(t) => Some(t.content.clone()),
                 _ => None,
@@ -192,6 +192,21 @@ mod tests {
     }
 
     #[test]
+    fn dyn_session_manager_coerces_to_dyn_session() {
+        // Probe: can an Arc<Mutex<dyn SessionManager>> be handed to the agent as
+        // an Arc<Mutex<dyn Session>>? (trait upcasting through Mutex). If this
+        // compiles, the builder can hold the manager trait object and serve both
+        // the agent and the subagent engine from one Arc.
+        fn as_session(m: Arc<Mutex<dyn SessionManager>>) -> Arc<Mutex<dyn crate::core::session::Session>> {
+            m
+        }
+        let mgr: Arc<Mutex<dyn SessionManager>> =
+            Arc::new(Mutex::new(SessionAdapter::new(InMemorySession::new(), inmem_factory())));
+        let session: Arc<Mutex<dyn crate::core::session::Session>> = as_session(mgr);
+        session.lock().unwrap().append(text_msg("user", "ok")).unwrap();
+    }
+
+    #[test]
     fn adapter_fork_returns_a_session_with_messages() {
         let mut main = InMemorySession::new();
         main.append(text_msg("user", "hello")).unwrap();
@@ -199,7 +214,7 @@ mod tests {
 
         let mut mgr = SessionAdapter::new(main, inmem_factory());
         let (_id, forked) = mgr.fork().unwrap();
-        assert_eq!(roles(&*forked), vec!["user".to_string(), "assistant".to_string()]);
+        assert_eq!(roles(&*forked.lock().unwrap()), vec!["user".to_string(), "assistant".to_string()]);
     }
 
     #[test]
@@ -208,26 +223,15 @@ mod tests {
         main.append(text_msg("user", "hello")).unwrap();
 
         let mut mgr = SessionAdapter::new(main, inmem_factory());
-        let (_id, mut forked) = mgr.fork().unwrap();
+        let (_id, forked) = mgr.fork().unwrap();
 
         mgr.append(text_msg("user", "main-only")).unwrap();
-        forked.append(text_msg("user", "fork-only")).unwrap();
+        forked.lock().unwrap().append(text_msg("user", "fork-only")).unwrap();
 
         assert_eq!(roles(&mgr), vec!["user".to_string(), "user".to_string()]);
-        assert_eq!(roles(&*forked), vec!["user".to_string(), "user".to_string()]);
+        assert_eq!(roles(&*forked.lock().unwrap()), vec!["user".to_string(), "user".to_string()]);
         assert_ne!(last_text(&mgr).as_deref(), Some("fork-only"));
-        assert_ne!(last_text(&*forked).as_deref(), Some("main-only"));
-    }
-
-    #[test]
-    fn adapter_fork_is_itself_a_session_manager() {
-        let mut main = InMemorySession::new();
-        main.append(text_msg("user", "hello")).unwrap();
-
-        let mut mgr = SessionAdapter::new(main, inmem_factory());
-        let (_id, mut forked) = mgr.fork().unwrap();
-        let (_gid, grandchild) = forked.fork().unwrap();
-        assert_eq!(roles(&*grandchild), vec!["user".to_string()]);
+        assert_ne!(last_text(&*forked.lock().unwrap()).as_deref(), Some("main-only"));
     }
 
     #[test]
@@ -239,7 +243,7 @@ mod tests {
         let mut mgr = SessionAdapter::new(main, inmem_factory());
         let (id, _forked) = mgr.fork().unwrap();
         let got = mgr.get(&id).unwrap();
-        assert_eq!(roles(&*got), vec!["user".to_string(), "assistant".to_string()]);
+        assert_eq!(roles(&*got.lock().unwrap()), vec!["user".to_string(), "assistant".to_string()]);
     }
 
     #[test]
@@ -248,13 +252,13 @@ mod tests {
         main.append(text_msg("user", "hello")).unwrap();
 
         let mut mgr = SessionAdapter::new(main, inmem_factory());
-        let (id, mut forked) = mgr.fork().unwrap();
+        let (id, forked) = mgr.fork().unwrap();
         // Append through one handle; a later get() of the same fork observes it,
         // because both share the fork's backing session.
-        forked.append(text_msg("assistant", "fork-only")).unwrap();
+        forked.lock().unwrap().append(text_msg("assistant", "fork-only")).unwrap();
 
         let got = mgr.get(&id).unwrap();
-        assert_eq!(roles(&*got), vec!["user".to_string(), "assistant".to_string()]);
+        assert_eq!(roles(&*got.lock().unwrap()), vec!["user".to_string(), "assistant".to_string()]);
     }
 
     #[test]
@@ -284,7 +288,7 @@ mod tests {
         s.append(text_msg("assistant", "hi")).unwrap();
 
         let (_id, forked) = SessionManager::fork(&mut s).unwrap();
-        assert_eq!(roles(&*forked), vec!["user".to_string(), "assistant".to_string()]);
+        assert_eq!(roles(&*forked.lock().unwrap()), vec!["user".to_string(), "assistant".to_string()]);
     }
 
     #[test]
@@ -296,7 +300,7 @@ mod tests {
         s.append(text_msg("user", "main-only")).unwrap();
 
         assert_eq!(roles(&s), vec!["user".to_string(), "user".to_string()]);
-        assert_eq!(roles(&*forked), vec!["user".to_string()]);
+        assert_eq!(roles(&*forked.lock().unwrap()), vec!["user".to_string()]);
     }
 
     #[test]
@@ -307,7 +311,7 @@ mod tests {
 
         let (id, _forked) = SessionManager::fork(&mut s).unwrap();
         let got = SessionManager::get(&s, &id).unwrap();
-        assert_eq!(roles(&*got), vec!["user".to_string(), "assistant".to_string()]);
+        assert_eq!(roles(&*got.lock().unwrap()), vec!["user".to_string(), "assistant".to_string()]);
     }
 
     #[test]

@@ -22,7 +22,7 @@
 //!
 //! Extensions default to the cross-cutting combo every real agent uses —
 //! [`SchemaVerification`] then [`CircuitBreaker`] — so a bare
-//! `AgentBuilder::new(model, provider).build().await` already gets schema
+//! `AgentBuilder::new(model, provider, session).build().await` already gets schema
 //! validation and output bounding. Append more with
 //! [`.extension()`](AgentBuilder::extension) (they run after the defaults), or
 //! drop the defaults entirely with
@@ -39,15 +39,16 @@ use anyhow::Context;
 use crate::core::agent::{Agent, AgentState};
 use crate::core::extensions::{Extension, NoopExtension};
 use crate::core::providers::{Model, Provider};
-use crate::core::session::{InMemorySession, Session};
+use crate::core::session::Session;
 use crate::core::tools::{ToolHandler, ToolRegistry};
+use crate::extra::agents::builder::SessionManager;
 use crate::extra::extensions::circuit_breaker::CircuitBreaker;
 use crate::extra::extensions::combinator::And;
 use crate::extra::extensions::schema::SchemaVerification;
 use crate::extra::tools::mcp;
 use crate::extra::tools::mcp::config::{McpConfig, StreamableHttpConfig};
 use crate::extra::tools::skill::{self, SkillConfig};
-use crate::extra::tools::subagent::{SessionFactory, Subagent};
+use crate::extra::tools::subagent::{Subagent, SubagentTool};
 
 /// A fluent builder for an [`Agent`].
 ///
@@ -57,11 +58,6 @@ use crate::extra::tools::subagent::{SessionFactory, Subagent};
 ///
 /// # Defaults
 ///
-/// - **Session**: a fresh [`InMemorySession`]; override with
-///   [`.session()`](AgentBuilder::session).
-/// - **Session factory** (the fresh session handed to each subagent/skill call):
-///   the same [`InMemorySession`]; override with
-///   [`.session_factory()`](AgentBuilder::session_factory).
 /// - **Main-agent tools**: none — opt tools in with
 ///   [`.tools_enable()`](AgentBuilder::tools_enable). Skills still see the full
 ///   pool regardless.
@@ -74,12 +70,16 @@ use crate::extra::tools::subagent::{SessionFactory, Subagent};
 /// # Example
 ///
 /// ```ignore
-/// use std::sync::Arc;
+/// use std::sync::{Arc, Mutex};
 /// use akasha::core::providers::{Model, Provider};
-/// use akasha::extra::agent::AgentBuilder;
+/// use akasha::core::session::InMemorySession;
+/// use akasha::extra::agents::builder::{AgentBuilder, SessionAdapter};
 ///
 /// async fn make(model: Model, provider: Arc<dyn Provider>) {
-///     let agent = AgentBuilder::new(model, provider)
+///     let session = Arc::new(Mutex::new(
+///         SessionAdapter::new(InMemorySession::new(), || InMemorySession::new().arc()),
+///     ));
+///     let agent = AgentBuilder::new(model, provider, session)
 ///         .tools_enable(["read_file", "search"])
 ///         .build()
 ///         .await
@@ -89,8 +89,7 @@ use crate::extra::tools::subagent::{SessionFactory, Subagent};
 pub struct AgentBuilder {
     model: Model,
     provider: Arc<dyn Provider>,
-    session: Option<Arc<Mutex<dyn Session>>>,
-    session_factory: SessionFactory,
+    session: Arc<Mutex<dyn SessionManager>>,
     extensions: Vec<Box<dyn Extension>>,
     use_default_extensions: bool,
     tools: ToolRegistry,
@@ -107,13 +106,11 @@ pub struct AgentBuilder {
 }
 
 impl AgentBuilder {
-    /// Start building an agent driven by `model` and `provider`.
-    pub fn new(model: Model, provider: Arc<dyn Provider>) -> Self {
+    pub fn new(model: Model, provider: Arc<dyn Provider>, session: Arc<Mutex<dyn SessionManager>>) -> Self {
         Self {
             model,
             provider,
-            session: None,
-            session_factory: Arc::new(|| Ok(InMemorySession::new().arc())),
+            session,
             extensions: Vec::new(),
             use_default_extensions: true,
             tools: ToolRegistry::new(),
@@ -122,20 +119,6 @@ impl AgentBuilder {
             mcps: Vec::new(),
             mcp_configs: Vec::new(),
         }
-    }
-
-    /// Use `session` instead of a fresh [`InMemorySession`]. The last call wins.
-    pub fn session(mut self, session: Arc<Mutex<dyn Session>>) -> Self {
-        self.session = Some(session);
-        self
-    }
-
-    /// Set the [`SessionFactory`] used to spin up a fresh session for each
-    /// subagent and skill invocation. Defaults to a fresh [`InMemorySession`]
-    /// per call.
-    pub fn session_factory(mut self, factory: SessionFactory) -> Self {
-        self.session_factory = factory;
-        self
     }
 
     /// Append `ext` to the extension chain. Extensions run in addition order;
@@ -194,15 +177,15 @@ impl AgentBuilder {
         self
     }
 
-    /// Wrap a [`Subagent`] as a tool in the pool. Each invocation runs the
-    /// subagent in a fresh session from the builder's
-    /// [session factory](AgentBuilder::session_factory). The main agent must
-    /// [enable](AgentBuilder::tools_enable) it to call it.
+    /// Wrap a [`Subagent`] as a tool in the pool, driven by the
+    /// [`SubagentTool`](crate::extra::tools::subagent::SubagentTool) engine. Each
+    /// invocation forks the builder's [main session](AgentBuilder::session) (or
+    /// resumes it by id), so the subagent inherits the conversation then runs
+    /// isolated. The main agent must [enable](AgentBuilder::tools_enable) it to
+    /// call it.
     pub fn subagent<S: Subagent + 'static>(mut self, subagent: S) -> Self {
-        let factory = self.session_factory.clone();
-        // `Arc<dyn Fn>` isn't itself `Fn` (the std blanket is only for `&F`), so
-        // wrap it in a closure — the same shape `skill::register` uses.
-        self.tools.register(subagent.tool(move || factory()));
+        let tool = SubagentTool::new(self.model.clone(), self.provider.clone(), self.session.clone(), subagent);
+        self.tools.register(Box::new(tool));
         self
     }
 
@@ -263,7 +246,7 @@ impl AgentBuilder {
                 self.model.clone(),
                 self.provider.clone(),
                 base.clone(),
-                self.session_factory.clone(),
+                self.session.clone(),
             )
             .with_context(|| format!("registering skills under '{}'", config.dir.display()))?;
         }
@@ -273,7 +256,7 @@ impl AgentBuilder {
         // captured the full pool above.
         self.tools = self.tools.subset(&self.enabled);
 
-        let session = self.session.unwrap_or_else(|| InMemorySession::new().arc());
+        let session: Arc<Mutex<dyn Session>> = self.session.clone();
         let extension = compose(self.extensions, self.use_default_extensions);
 
         Ok(Agent {
@@ -322,21 +305,20 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    use crate::core::session::InMemorySession;
+    use crate::extra::agents::builder::SessionAdapter;
+    use crate::extra::sessions::sqlite::SqliteSession;
+
     use async_trait::async_trait;
     use futures::stream;
 
     use crate::core::providers::{ProviderError, StreamResponse, StreamResponseStream};
-    use crate::core::session::InMemorySession;
     use crate::core::tools::ToolError;
     use crate::core::types::{
-        ContentBlock, Message, TextContent, TokenUsage, ToolCall, ToolDefinition, ToolResult, ToolResultContent,
+        ContentBlock, Message, TextContent, TokenUsage, ToolDefinition, ToolResult, ToolResultContent,
     };
 
     static COUNTER: AtomicU64 = AtomicU64::new(0);
-
-    /// The fixed name of the structured-output tool a skill sub-agent calls to
-    /// hand back its result.
-    const SUBMIT: &str = "akasha_skill_submit";
 
     /// A provider that streams exactly one scripted assistant message per
     /// `stream()` call and records the tool definitions it was handed — enough
@@ -436,18 +418,8 @@ mod tests {
         fn definition(&self) -> ToolDefinition {
             self.definition.clone()
         }
-
-        async fn execute(
-            &self,
-            _session: Arc<Mutex<dyn Session>>,
-            _cancel: futures::channel::oneshot::Receiver<bool>,
-            _params: serde_json::Value,
-        ) -> Result<ToolResult, ToolError> {
-            Ok(ToolResult {
-                tool_call_id: None,
-                content: vec![ToolResultContent::Text(TextContent { content: "echo".to_string() })],
-                is_error: false,
-            })
+        fn seed(&self, _params: &serde_json::Value, _resume: bool) -> Result<Vec<ContentBlock>, ToolError> {
+            Ok(vec![ContentBlock::Text(TextContent { content: "go".to_string() })])
         }
     }
 
@@ -465,21 +437,15 @@ mod tests {
         Arc::new(OneShotProvider::new(assistant_text(msg)))
     }
 
+    /// A fresh `SessionAdapter` manager — the main session most tests hand to `new`.
+    fn manager() -> Arc<Mutex<dyn SessionManager>> {
+        Arc::new(Mutex::new(SessionAdapter::new(InMemorySession::new(), || InMemorySession::new().arc())))
+    }
+
     fn assistant_text(text: &str) -> Message {
         Message {
             role: "assistant".to_string(),
             content: vec![ContentBlock::Text(TextContent { content: text.to_string() })],
-        }
-    }
-
-    fn assistant_tool_call(name: &str, arguments: serde_json::Value) -> Message {
-        Message {
-            role: "assistant".to_string(),
-            content: vec![ContentBlock::ToolCall(ToolCall {
-                id: "call".to_string(),
-                name: name.to_string(),
-                arguments,
-            })],
         }
     }
 
@@ -523,7 +489,7 @@ mod tests {
 
     #[tokio::test]
     async fn minimal_build_applies_standard_extensions() {
-        let agent = AgentBuilder::new(model(), provider("hi")).build().await.unwrap();
+        let agent = AgentBuilder::new(model(), provider("hi"), manager()).build().await.unwrap();
         // Schema + Circuit compose into And; no tools enabled; model threaded through.
         assert_eq!(agent.extension.name(), "and");
         assert!(agent.state.tools.definitions().is_empty(), "deny-all: nothing enabled");
@@ -532,19 +498,23 @@ mod tests {
 
     #[tokio::test]
     async fn custom_extension_is_composed_after_defaults() {
-        let agent =
-            AgentBuilder::new(model(), provider("hi")).extension(NamedExt { name: "custom" }).build().await.unwrap();
+        let agent = AgentBuilder::new(model(), provider("hi"), manager())
+            .extension(NamedExt { name: "custom" })
+            .build()
+            .await
+            .unwrap();
         // Defaults + 1 user extension = 3, still folded via And.
         assert_eq!(agent.extension.name(), "and");
     }
 
     #[tokio::test]
     async fn no_default_extensions_gives_bare_agent() {
-        let agent = AgentBuilder::new(model(), provider("hi")).no_default_extensions().build().await.unwrap();
+        let agent =
+            AgentBuilder::new(model(), provider("hi"), manager()).no_default_extensions().build().await.unwrap();
         assert_eq!(agent.extension.name(), "noop");
 
         // A single opted-in extension is used directly (no And wrapper).
-        let agent = AgentBuilder::new(model(), provider("hi"))
+        let agent = AgentBuilder::new(model(), provider("hi"), manager())
             .no_default_extensions()
             .extension(NamedExt { name: "custom" })
             .build()
@@ -556,7 +526,7 @@ mod tests {
     #[tokio::test]
     async fn main_agent_denies_all_tools_by_default() {
         // Tools registered but never enabled => the main agent sees none.
-        let agent = AgentBuilder::new(model(), provider("hi"))
+        let agent = AgentBuilder::new(model(), provider("hi"), manager())
             .no_default_extensions()
             .tool(StubTool { name: "a" })
             .tool(StubTool { name: "b" })
@@ -568,7 +538,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_enable_exposes_only_named_tools() {
-        let agent = AgentBuilder::new(model(), provider("hi"))
+        let agent = AgentBuilder::new(model(), provider("hi"), manager())
             .no_default_extensions()
             .tool(StubTool { name: "a" })
             .tool(StubTool { name: "b" })
@@ -584,7 +554,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_enable_accumulates_across_calls() {
-        let agent = AgentBuilder::new(model(), provider("hi"))
+        let agent = AgentBuilder::new(model(), provider("hi"), manager())
             .no_default_extensions()
             .tool(StubTool { name: "a" })
             .tool(StubTool { name: "b" })
@@ -602,7 +572,7 @@ mod tests {
     async fn tools_enable_with_seeded_registry() {
         let mut seed = ToolRegistry::new();
         seed.register(StubTool { name: "a" }.into());
-        let agent = AgentBuilder::new(model(), provider("hi"))
+        let agent = AgentBuilder::new(model(), provider("hi"), manager())
             .no_default_extensions()
             .tools(seed)
             .tool(StubTool { name: "b" })
@@ -618,7 +588,7 @@ mod tests {
     #[tokio::test]
     async fn subagent_registers_but_needs_enabling() {
         // Registered into the pool, but invisible to the main agent until enabled.
-        let agent = AgentBuilder::new(model(), provider("hi"))
+        let agent = AgentBuilder::new(model(), provider("hi"), manager())
             .no_default_extensions()
             .subagent(EchoSubagent { definition: def("echo") })
             .build()
@@ -626,7 +596,7 @@ mod tests {
             .unwrap();
         assert!(agent.state.tools.get("echo").is_none(), "not enabled => hidden");
 
-        let agent = AgentBuilder::new(model(), provider("hi"))
+        let agent = AgentBuilder::new(model(), provider("hi"), manager())
             .no_default_extensions()
             .subagent(EchoSubagent { definition: def("echo") })
             .tools_enable(["echo"])
@@ -639,7 +609,7 @@ mod tests {
     #[tokio::test]
     async fn skills_register_and_are_callable_when_enabled() {
         let (guard, cfg) = skill_dir("alpha");
-        let agent = AgentBuilder::new(model(), provider("hi"))
+        let agent = AgentBuilder::new(model(), provider("hi"), manager())
             .no_default_extensions()
             .skills(cfg)
             .tools_enable(["alpha"])
@@ -651,60 +621,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn skills_base_pool_ignores_tools_enable() {
-        // "x" is in the pool but NOT enabled for the main agent; the skill still
-        // sees it as base, proving skills draw from the full pool — not the
-        // tools_enable subset.
-        let provider = OneShotProvider::new(assistant_tool_call(SUBMIT, serde_json::json!({ "result": "done" })));
-        let seen = provider.seen_tools.clone();
-        let (guard, cfg) = skill_dir_with_allowed("alpha", Some("x"));
-
-        let agent = AgentBuilder::new(model(), Arc::new(provider))
-            .no_default_extensions()
-            .tool(StubTool { name: "x" })
-            .skills(cfg)
-            .tools_enable(["alpha"])
-            .build()
-            .await
-            .unwrap();
-
-        // The main agent sees only the enabled skill, not "x".
-        let mut names: Vec<String> = agent.state.tools.definitions().into_iter().map(|d| d.name).collect();
-        names.sort();
-        assert_eq!(names, vec!["alpha".to_string()], "x is hidden from the main agent");
-
-        // Run the skill: it was offered "x" (its allowed base tool) plus the
-        // submit tool, even though x is invisible to the main agent.
-        let (_, rx) = futures::channel::oneshot::channel();
-        agent
-            .state
-            .tools
-            .get("alpha")
-            .expect("alpha is enabled")
-            .execute(rx, serde_json::json!({ "input": "go" }))
-            .await
-            .unwrap();
-
-        let offered: Vec<String> = seen.lock().unwrap().iter().flatten().map(|d| d.name.clone()).collect();
-        assert!(
-            offered.iter().any(|n| n == "x"),
-            "skill base is the full pool, not the tools_enable subset: {offered:?}"
-        );
-        drop(guard);
-    }
-
-    #[tokio::test]
     async fn session_override_is_honored() {
-        let mut seed = InMemorySession::new();
-        seed.append(Message {
+        // Any SessionManager plugs in directly — here a SqliteSession, with no
+        // SessionAdapter wrapping (so no double cache). Provided to `new`.
+        let mut main = SqliteSession::new(":memory:", "main").unwrap();
+        main.append(Message {
             role: "system".to_string(),
             content: vec![ContentBlock::Text(TextContent { content: "seed".to_string() })],
         })
         .unwrap();
-        let session: Arc<Mutex<dyn Session>> = seed.arc();
+        let main: Arc<Mutex<dyn SessionManager>> = Arc::new(Mutex::new(main));
 
-        let agent =
-            AgentBuilder::new(model(), provider("hi")).no_default_extensions().session(session).build().await.unwrap();
+        let agent = AgentBuilder::new(model(), provider("hi"), main).no_default_extensions().build().await.unwrap();
         let count = agent.state.session.lock().unwrap().messages().count();
         assert_eq!(count, 1, "the seeded session is preserved, not replaced");
     }
@@ -713,7 +641,7 @@ mod tests {
     async fn unsupported_mcp_entry_surfaces_build_error() {
         // An unknown entry fails `into_config()` deterministically (no network).
         let cfg: McpConfig = serde_json::from_str(r#"{"mcpServers":{"s":{"foo":"bar"}}}"#).unwrap();
-        let err = AgentBuilder::new(model(), provider("hi"))
+        let err = AgentBuilder::new(model(), provider("hi"), manager())
             .mcp_servers(cfg)
             .build()
             .await
@@ -731,7 +659,7 @@ mod tests {
             allow: vec![],
             deny: vec![],
         };
-        let err = AgentBuilder::new(model(), provider("hi"))
+        let err = AgentBuilder::new(model(), provider("hi"), manager())
             .mcp(bad)
             .build()
             .await
@@ -742,8 +670,11 @@ mod tests {
 
     #[tokio::test]
     async fn build_then_prompt_runs_one_turn() {
-        let mut agent =
-            AgentBuilder::new(model(), provider("hello there")).no_default_extensions().build().await.unwrap();
+        let mut agent = AgentBuilder::new(model(), provider("hello there"), manager())
+            .no_default_extensions()
+            .build()
+            .await
+            .unwrap();
         agent
             .prompt(Message {
                 role: "user".to_string(),

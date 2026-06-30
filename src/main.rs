@@ -8,7 +8,9 @@ use akasha::core::providers::{Model, Provider};
 use akasha::core::session::{InMemorySession, Session};
 use akasha::core::tools::ToolRegistry;
 use akasha::core::types::{ContentBlock, Message, TextContent};
-use akasha::extra::extensions::{circuit_breaker::CircuitBreaker, combinator::And, schema::SchemaVerification, telegram};
+use akasha::extra::agents::builder::{SessionAdapter, SessionManager};
+use akasha::extra::extensions::{circuit_breaker::CircuitBreaker, combinator::And, schema::SchemaVerification};
+use akasha::extra::frontend::telegram;
 use akasha::extra::providers::deepseek::DeepSeekProvider;
 use akasha::extra::providers::tier::{TierProvider, tier};
 use akasha::extra::sessions::mux::MuxSession;
@@ -97,8 +99,12 @@ async fn main() {
     let mut tools = ToolRegistry::new();
     if let Some(dir) = &cli.skills {
         let config = skill::SkillConfig { dir: dir.clone() };
-        let session_factory = Arc::new(|| Ok(InMemorySession::new().arc()));
-        skill::register(&mut tools, &config, tier(1), provider.clone(), base_tools, session_factory)
+        // A shared SessionManager the skills fork/resume through. Forks start
+        // fresh (the root is empty) and isolate via a `stop`, matching the old
+        // per-call factory behavior; the manager lives for the process.
+        let manager: Arc<Mutex<dyn SessionManager>> =
+            Arc::new(Mutex::new(SessionAdapter::new(InMemorySession::new(), || InMemorySession::new().arc())));
+        skill::register(&mut tools, &config, tier(1), provider.clone(), base_tools, manager)
             .unwrap_or_else(|e| panic!("failed to register skills from '{}': {e}", dir.display()));
     }
 
@@ -138,7 +144,11 @@ async fn main() {
 
                     (mux, And::new(SchemaVerification::new(), And::new(CircuitBreaker::new(), ext)).into(), tools)
                 }
-                None => (InMemorySession::new().arc(), And::new(SchemaVerification::new(), CircuitBreaker::new()).into(), tools.clone()),
+                None => (
+                    InMemorySession::new().arc(),
+                    And::new(SchemaVerification::new(), CircuitBreaker::new()).into(),
+                    tools.clone(),
+                ),
             };
 
             Ok(Agent {
