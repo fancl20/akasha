@@ -35,15 +35,18 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::Context;
+use tokio::sync::mpsc;
 
 use crate::core::agent::{Agent, AgentState};
 use crate::core::extensions::{Extension, NoopExtension};
 use crate::core::providers::{Model, Provider};
 use crate::core::session::Session;
 use crate::core::tools::{ToolHandler, ToolRegistry};
+use crate::core::types::Message;
 use crate::extra::agents::builder::SessionManager;
 use crate::extra::extensions::circuit_breaker::CircuitBreaker;
 use crate::extra::extensions::combinator::And;
+use crate::extra::extensions::io::{IOExtension, OutputEvent};
 use crate::extra::extensions::schema::SchemaVerification;
 use crate::extra::tools::mcp;
 use crate::extra::tools::mcp::config::{McpConfig, StreamableHttpConfig};
@@ -70,15 +73,13 @@ use crate::extra::tools::subagent::{Subagent, SubagentTool};
 /// # Example
 ///
 /// ```ignore
-/// use std::sync::{Arc, Mutex};
+/// use std::sync::Arc;
 /// use akasha::core::providers::{Model, Provider};
-/// use akasha::core::session::InMemorySession;
-/// use akasha::extra::agents::builder::{AgentBuilder, SessionAdapter};
+/// use akasha::core::session::{InMemorySession, Session};
+/// use akasha::extra::agents::builder::AgentBuilder;
 ///
 /// async fn make(model: Model, provider: Arc<dyn Provider>) {
-///     let session = Arc::new(Mutex::new(
-///         SessionAdapter::new(InMemorySession::new(), || InMemorySession::new().arc()),
-///     ));
+///     let session = InMemorySession::new().arc();
 ///     let agent = AgentBuilder::new(model, provider, session)
 ///         .tools_enable(["read_file", "search"])
 ///         .build()
@@ -89,16 +90,17 @@ use crate::extra::tools::subagent::{Subagent, SubagentTool};
 pub struct AgentBuilder {
     model: Model,
     provider: Arc<dyn Provider>,
-    session: Arc<Mutex<dyn SessionManager>>,
+    session: Arc<Mutex<dyn Session>>,
     extensions: Vec<Box<dyn Extension>>,
     use_default_extensions: bool,
     tools: ToolRegistry,
     /// Tools the *main* agent may call (deny-all until opted in via
     /// `tools_enable`). Skills draw from the full pool, not this subset.
     enabled: Vec<String>,
-    /// Deferred skill configs; each dir's skills draw from the agent's full
-    /// tool pool (snapshotted at build, before skill registration).
-    skills: Vec<SkillConfig>,
+    /// Deferred skill configs paired with the [`SessionManager`] they fork from;
+    /// each dir's skills draw from the agent's full tool pool (snapshotted at
+    /// build, before skill registration).
+    skills: Vec<(Arc<Mutex<dyn SessionManager>>, SkillConfig)>,
     /// Deferred single-server configs; connected at `build()`.
     mcps: Vec<StreamableHttpConfig>,
     /// Deferred multi-server configs; flattened at `build()`.
@@ -106,7 +108,7 @@ pub struct AgentBuilder {
 }
 
 impl AgentBuilder {
-    pub fn new(model: Model, provider: Arc<dyn Provider>, session: Arc<Mutex<dyn SessionManager>>) -> Self {
+    pub fn new(model: Model, provider: Arc<dyn Provider>, session: Arc<Mutex<dyn Session>>) -> Self {
         Self {
             model,
             provider,
@@ -179,23 +181,23 @@ impl AgentBuilder {
 
     /// Wrap a [`Subagent`] as a tool in the pool, driven by the
     /// [`SubagentTool`](crate::extra::tools::subagent::SubagentTool) engine. Each
-    /// invocation forks the builder's [main session](AgentBuilder::session) (or
-    /// resumes it by id), so the subagent inherits the conversation then runs
-    /// isolated. The main agent must [enable](AgentBuilder::tools_enable) it to
-    /// call it.
-    pub fn subagent<S: Subagent + 'static>(mut self, subagent: S) -> Self {
-        let tool = SubagentTool::new(self.model.clone(), self.provider.clone(), self.session.clone(), subagent);
+    /// invocation forks `manager` (or resumes a fork by id), so the subagent
+    /// inherits that conversation then runs isolated. The main agent must
+    /// [enable](AgentBuilder::tools_enable) it to call it.
+    pub fn subagent<S: Subagent + 'static>(mut self, manager: Arc<Mutex<dyn SessionManager>>, subagent: S) -> Self {
+        let tool = SubagentTool::new(self.model.clone(), self.provider.clone(), manager, subagent);
         self.tools.register(Box::new(tool));
         self
     }
 
     /// Discover every valid skill under `config.dir` and register each as a
-    /// subagent tool in the pool. Skills draw their base tool pool from the
-    /// agent's own tools — every tool registered so far, snapshotted at
-    /// `build()` before the skills themselves are added (so a skill cannot
-    /// recursively invoke itself or a sibling). Discovery happens at `build()`.
-    pub fn skills(mut self, config: SkillConfig) -> Self {
-        self.skills.push(config);
+    /// subagent tool in the pool. Skills fork from `manager` and draw their base
+    /// tool pool from the agent's own tools — every tool registered so far,
+    /// snapshotted at `build()` before the skills themselves are added (so a
+    /// skill cannot recursively invoke itself or a sibling). Discovery happens
+    /// at `build()`.
+    pub fn skills(mut self, manager: Arc<Mutex<dyn SessionManager>>, config: SkillConfig) -> Self {
+        self.skills.push((manager, config));
         self
     }
 
@@ -239,14 +241,14 @@ impl AgentBuilder {
         // (or a sibling). `tools_enable` does not narrow this base — only the
         // main agent's own view, applied below.
         let base = self.tools.clone();
-        for config in std::mem::take(&mut self.skills) {
+        for (manager, config) in std::mem::take(&mut self.skills) {
             skill::register(
                 &mut self.tools,
                 &config,
                 self.model.clone(),
                 self.provider.clone(),
                 base.clone(),
-                self.session.clone(),
+                manager,
             )
             .with_context(|| format!("registering skills under '{}'", config.dir.display()))?;
         }
@@ -256,7 +258,7 @@ impl AgentBuilder {
         // captured the full pool above.
         self.tools = self.tools.subset(&self.enabled);
 
-        let session: Arc<Mutex<dyn Session>> = self.session.clone();
+        let session = self.session.clone();
         let extension = compose(self.extensions, self.use_default_extensions);
 
         Ok(Agent {
@@ -264,6 +266,29 @@ impl AgentBuilder {
             provider: self.provider,
             extension,
         })
+    }
+
+    /// Wire an [`IOExtension`] into the chain and return the transport channels
+    /// as `(rx, tx)`:
+    ///
+    /// - `rx` — outbound [`OutputEvent`]s (streamed content, tool notices, turn
+    ///   finishes) the transport renders.
+    /// - `tx` — the inbound [`Message`] sender the transport feeds to drive the
+    ///   next turn.
+    ///
+    /// The extension is appended like any other (via
+    /// [`.extension()`](AgentBuilder::extension)), so call `bind_io` **last** —
+    /// after every other extension — so io's turn-end input gating runs after
+    /// them. Returns the builder (for further chaining / `.build()`) alongside
+    /// the channels. The bridge owns no task; the caller spawns
+    /// `agent.prompt(first)` itself at `build()` time.
+    ///
+    /// [`IOExtension`]: crate::extra::extensions::io::IOExtension
+    /// [`OutputEvent`]: crate::extra::extensions::io::OutputEvent
+    /// [`Message`]: crate::core::types::Message
+    pub fn bind_io(self) -> (Self, mpsc::UnboundedReceiver<OutputEvent>, mpsc::UnboundedSender<Message>) {
+        let (io, tx, rx) = IOExtension::new();
+        (self.extension(io), rx, tx)
     }
 }
 
@@ -304,13 +329,15 @@ mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::Duration;
 
-    use crate::core::session::InMemorySession;
+    use crate::core::session::{InMemorySession, Session};
     use crate::extra::agents::builder::SessionAdapter;
     use crate::extra::sessions::sqlite::SqliteSession;
 
     use async_trait::async_trait;
     use futures::stream;
+    use tokio::time::timeout;
 
     use crate::core::providers::{ProviderError, StreamResponse, StreamResponseStream};
     use crate::core::tools::ToolError;
@@ -437,7 +464,12 @@ mod tests {
         Arc::new(OneShotProvider::new(assistant_text(msg)))
     }
 
-    /// A fresh `SessionAdapter` manager — the main session most tests hand to `new`.
+    /// A fresh plain session — the main session most tests hand to `new`.
+    fn session() -> Arc<Mutex<dyn Session>> {
+        InMemorySession::new().arc()
+    }
+
+    /// A fresh `SessionAdapter` manager — the fork source for `subagent`/`skills`.
     fn manager() -> Arc<Mutex<dyn SessionManager>> {
         Arc::new(Mutex::new(SessionAdapter::new(InMemorySession::new(), || InMemorySession::new().arc())))
     }
@@ -489,7 +521,7 @@ mod tests {
 
     #[tokio::test]
     async fn minimal_build_applies_standard_extensions() {
-        let agent = AgentBuilder::new(model(), provider("hi"), manager()).build().await.unwrap();
+        let agent = AgentBuilder::new(model(), provider("hi"), session()).build().await.unwrap();
         // Schema + Circuit compose into And; no tools enabled; model threaded through.
         assert_eq!(agent.extension.name(), "and");
         assert!(agent.state.tools.definitions().is_empty(), "deny-all: nothing enabled");
@@ -498,7 +530,7 @@ mod tests {
 
     #[tokio::test]
     async fn custom_extension_is_composed_after_defaults() {
-        let agent = AgentBuilder::new(model(), provider("hi"), manager())
+        let agent = AgentBuilder::new(model(), provider("hi"), session())
             .extension(NamedExt { name: "custom" })
             .build()
             .await
@@ -510,11 +542,11 @@ mod tests {
     #[tokio::test]
     async fn no_default_extensions_gives_bare_agent() {
         let agent =
-            AgentBuilder::new(model(), provider("hi"), manager()).no_default_extensions().build().await.unwrap();
+            AgentBuilder::new(model(), provider("hi"), session()).no_default_extensions().build().await.unwrap();
         assert_eq!(agent.extension.name(), "noop");
 
         // A single opted-in extension is used directly (no And wrapper).
-        let agent = AgentBuilder::new(model(), provider("hi"), manager())
+        let agent = AgentBuilder::new(model(), provider("hi"), session())
             .no_default_extensions()
             .extension(NamedExt { name: "custom" })
             .build()
@@ -526,7 +558,7 @@ mod tests {
     #[tokio::test]
     async fn main_agent_denies_all_tools_by_default() {
         // Tools registered but never enabled => the main agent sees none.
-        let agent = AgentBuilder::new(model(), provider("hi"), manager())
+        let agent = AgentBuilder::new(model(), provider("hi"), session())
             .no_default_extensions()
             .tool(StubTool { name: "a" })
             .tool(StubTool { name: "b" })
@@ -538,7 +570,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_enable_exposes_only_named_tools() {
-        let agent = AgentBuilder::new(model(), provider("hi"), manager())
+        let agent = AgentBuilder::new(model(), provider("hi"), session())
             .no_default_extensions()
             .tool(StubTool { name: "a" })
             .tool(StubTool { name: "b" })
@@ -554,7 +586,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_enable_accumulates_across_calls() {
-        let agent = AgentBuilder::new(model(), provider("hi"), manager())
+        let agent = AgentBuilder::new(model(), provider("hi"), session())
             .no_default_extensions()
             .tool(StubTool { name: "a" })
             .tool(StubTool { name: "b" })
@@ -572,7 +604,7 @@ mod tests {
     async fn tools_enable_with_seeded_registry() {
         let mut seed = ToolRegistry::new();
         seed.register(StubTool { name: "a" }.into());
-        let agent = AgentBuilder::new(model(), provider("hi"), manager())
+        let agent = AgentBuilder::new(model(), provider("hi"), session())
             .no_default_extensions()
             .tools(seed)
             .tool(StubTool { name: "b" })
@@ -588,17 +620,17 @@ mod tests {
     #[tokio::test]
     async fn subagent_registers_but_needs_enabling() {
         // Registered into the pool, but invisible to the main agent until enabled.
-        let agent = AgentBuilder::new(model(), provider("hi"), manager())
+        let agent = AgentBuilder::new(model(), provider("hi"), session())
             .no_default_extensions()
-            .subagent(EchoSubagent { definition: def("echo") })
+            .subagent(manager(), EchoSubagent { definition: def("echo") })
             .build()
             .await
             .unwrap();
         assert!(agent.state.tools.get("echo").is_none(), "not enabled => hidden");
 
-        let agent = AgentBuilder::new(model(), provider("hi"), manager())
+        let agent = AgentBuilder::new(model(), provider("hi"), session())
             .no_default_extensions()
-            .subagent(EchoSubagent { definition: def("echo") })
+            .subagent(manager(), EchoSubagent { definition: def("echo") })
             .tools_enable(["echo"])
             .build()
             .await
@@ -609,9 +641,9 @@ mod tests {
     #[tokio::test]
     async fn skills_register_and_are_callable_when_enabled() {
         let (guard, cfg) = skill_dir("alpha");
-        let agent = AgentBuilder::new(model(), provider("hi"), manager())
+        let agent = AgentBuilder::new(model(), provider("hi"), session())
             .no_default_extensions()
-            .skills(cfg)
+            .skills(manager(), cfg)
             .tools_enable(["alpha"])
             .build()
             .await
@@ -622,15 +654,14 @@ mod tests {
 
     #[tokio::test]
     async fn session_override_is_honored() {
-        // Any SessionManager plugs in directly — here a SqliteSession, with no
-        // SessionAdapter wrapping (so no double cache). Provided to `new`.
+        // Any Session plugs in directly — here a SqliteSession. Provided to `new`.
         let mut main = SqliteSession::new(":memory:", "main").unwrap();
         main.append(Message {
             role: "system".to_string(),
             content: vec![ContentBlock::Text(TextContent { content: "seed".to_string() })],
         })
         .unwrap();
-        let main: Arc<Mutex<dyn SessionManager>> = Arc::new(Mutex::new(main));
+        let main = main.arc();
 
         let agent = AgentBuilder::new(model(), provider("hi"), main).no_default_extensions().build().await.unwrap();
         let count = agent.state.session.lock().unwrap().messages().count();
@@ -641,7 +672,7 @@ mod tests {
     async fn unsupported_mcp_entry_surfaces_build_error() {
         // An unknown entry fails `into_config()` deterministically (no network).
         let cfg: McpConfig = serde_json::from_str(r#"{"mcpServers":{"s":{"foo":"bar"}}}"#).unwrap();
-        let err = AgentBuilder::new(model(), provider("hi"), manager())
+        let err = AgentBuilder::new(model(), provider("hi"), session())
             .mcp_servers(cfg)
             .build()
             .await
@@ -659,7 +690,7 @@ mod tests {
             allow: vec![],
             deny: vec![],
         };
-        let err = AgentBuilder::new(model(), provider("hi"), manager())
+        let err = AgentBuilder::new(model(), provider("hi"), session())
             .mcp(bad)
             .build()
             .await
@@ -670,7 +701,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_then_prompt_runs_one_turn() {
-        let mut agent = AgentBuilder::new(model(), provider("hello there"), manager())
+        let mut agent = AgentBuilder::new(model(), provider("hello there"), session())
             .no_default_extensions()
             .build()
             .await
@@ -686,5 +717,54 @@ mod tests {
         // A turn that produced assistant text ends with an assistant message.
         let last_role = agent.state.session.lock().unwrap().messages().last().map(|m| m.role.clone());
         assert_eq!(last_role.as_deref(), Some("assistant"));
+    }
+
+    /// Receive the next outbound event, failing (with a timeout) if the bridge stalls.
+    async fn next_io_event(rx: &mut mpsc::UnboundedReceiver<OutputEvent>) -> OutputEvent {
+        timeout(Duration::from_secs(2), rx.recv()).await.expect("event within timeout").expect("event channel open")
+    }
+
+    fn user_msg(text: &str) -> Message {
+        Message {
+            role: "user".to_string(),
+            content: vec![ContentBlock::Text(TextContent { content: text.to_string() })],
+        }
+    }
+
+    /// `bind_io` appends an `IOExtension` (as a regular extension) and returns
+    /// `(builder, rx, tx)`; `build()` then wires it last over the default
+    /// extensions. Driving the agent streams output through `rx`, a `Finish`
+    /// handshake gates the turn, and a message on `tx` advances to the next turn.
+    #[tokio::test]
+    async fn bind_io_returns_drivable_agent_and_channels() {
+        let (builder, mut rx, tx) = AgentBuilder::new(model(), provider("reply"), session()).bind_io();
+        let mut agent = builder.build().await.unwrap();
+
+        // io is wired last over the default Schema + Circuit extensions → And.
+        assert_eq!(agent.extension.name(), "and");
+
+        // The caller starts the agent task itself; the bridge carries the first prompt.
+        let task = tokio::spawn(async move { agent.prompt(user_msg("hello")).await });
+
+        // Turn 1: the streamed reply, then a finish handshake.
+        match next_io_event(&mut rx).await {
+            OutputEvent::Append(ContentBlock::Text(t)) => assert_eq!(t.content, "reply"),
+            _ => panic!("expected Append(Text)"),
+        }
+        let ack = match next_io_event(&mut rx).await {
+            OutputEvent::Finish(ack) => ack,
+            _ => panic!("expected Finish after the turn"),
+        };
+        ack.send(Ok(())).unwrap();
+
+        // Turn 2: a message on tx drives a fresh turn — same contract repeats.
+        tx.send(user_msg("again")).unwrap();
+        match next_io_event(&mut rx).await {
+            OutputEvent::Append(ContentBlock::Text(t)) => assert_eq!(t.content, "reply"),
+            _ => panic!("expected Append(Text) on turn 2"),
+        }
+        assert!(matches!(next_io_event(&mut rx).await, OutputEvent::Finish(_)), "turn 2 also finishes");
+
+        task.abort();
     }
 }

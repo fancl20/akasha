@@ -3,13 +3,11 @@ use std::ops::Sub;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
-use akasha::core::agent::{Agent, AgentState};
 use akasha::core::providers::{Model, Provider};
 use akasha::core::session::{InMemorySession, Session};
 use akasha::core::tools::ToolRegistry;
 use akasha::core::types::{ContentBlock, Message, TextContent};
-use akasha::extra::agents::builder::{SessionAdapter, SessionManager};
-use akasha::extra::extensions::{circuit_breaker::CircuitBreaker, combinator::And, schema::SchemaVerification};
+use akasha::extra::agents::builder::{AgentBuilder, SessionAdapter, SessionManager};
 use akasha::extra::frontend::telegram;
 use akasha::extra::providers::deepseek::DeepSeekProvider;
 use akasha::extra::providers::tier::{TierProvider, tier};
@@ -119,7 +117,7 @@ async fn main() {
         cli.telegram_token,
         allowed_ids,
         Arc::new(move |user| {
-            let (session, extension, tools) = match user {
+            let (session, mux_ext, tools) = match user {
                 Some(user) => {
                     let dir = data_dir().join("db");
                     let _ = std::fs::create_dir_all(&dir);
@@ -142,20 +140,18 @@ async fn main() {
                     tools.register(Box::new(tool));
                     let mux: Arc<Mutex<dyn Session>> = mux;
 
-                    (mux, And::new(SchemaVerification::new(), And::new(CircuitBreaker::new(), ext)).into(), tools)
+                    (mux, Some(ext), tools)
                 }
-                None => (
-                    InMemorySession::new().arc(),
-                    And::new(SchemaVerification::new(), CircuitBreaker::new()).into(),
-                    tools.clone(),
-                ),
+                None => (InMemorySession::new().arc(), None, tools.clone()),
             };
 
-            Ok(Agent {
-                state: AgentState { model: tier(0), tools: tools, session },
-                provider: provider.clone(),
-                extension,
-            })
+            // Schema + Circuit are the builder's defaults; the mux extension (when
+            // present) appends after them, matching the prior hand-built chain.
+            let mut builder = AgentBuilder::new(tier(0), provider.clone(), session).tools(tools);
+            if let Some(ext) = mux_ext {
+                builder = builder.extension(ext);
+            }
+            Ok(builder)
         }),
     )
     .await

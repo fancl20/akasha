@@ -11,9 +11,9 @@ use teloxide::{ApiError, Bot, RequestError, dptree};
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinSet;
 
-use crate::core::agent::Agent;
 use crate::core::types::{ContentBlock, Message, TextContent};
-use crate::extra::extensions::io::{IOExtension, OutputEvent};
+use crate::extra::agents::builder::AgentBuilder;
+use crate::extra::extensions::io::OutputEvent;
 
 /// Background task: receives events from the channel, batches them,
 /// and flushes to Telegram with throttling.
@@ -113,7 +113,7 @@ enum State {
 
 type AgentDialogue = Dialogue<State, InMemStorage<State>>;
 type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
-type AgentFactory = Arc<dyn Fn(Option<User>) -> anyhow::Result<Agent> + Send + Sync + 'static>;
+type AgentFactory = Arc<dyn Fn(Option<User>) -> anyhow::Result<AgentBuilder> + Send + Sync + 'static>;
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Bot commands")]
@@ -178,8 +178,8 @@ async fn handle_prompt(
 ) -> HandlerResult {
     match dialogue.get_or_default().await? {
         State::Idle => {
-            let agent = factory(msg.from)?;
-            let (mut agent, tx, rx) = IOExtension::bind(agent);
+            let (builder, rx, tx) = factory(msg.from)?.bind_io();
+            let mut agent = builder.build().await?;
             let mut tasks = JoinSet::new();
             tasks.spawn(async move {
                 if let Err(e) = agent.prompt(prompt).await {

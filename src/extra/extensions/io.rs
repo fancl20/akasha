@@ -5,10 +5,11 @@
 //! **out** as [`OutputEvent`]s, and the next user message flows **in** at each
 //! turn boundary.
 //!
-//! [`IOExtension::bind`] returns the agent (with the extension wired in
-//! **last**, so its turn-end input gating runs after every other extension),
-//! the inbound message sender, and the outbound event receiver. The caller
-//! spawns `agent.prompt(first)` itself — the bridge owns no task of its own.
+//! [`IOExtension::new`] returns the extension alongside the inbound message
+//! sender and the outbound event receiver; add it to an agent's extension chain
+//! **last**, so its turn-end input gating runs after every other extension. The
+//! caller spawns `agent.prompt(first)` itself — the bridge owns no task of its
+//! own.
 //!
 //! [`Agent`]: crate::core::agent::Agent
 //! [`Session`]: crate::core::session::Session
@@ -17,11 +18,10 @@
 use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 
-use crate::core::agent::{Agent, AgentState};
+use crate::core::agent::AgentState;
 use crate::core::extensions::{Extension, ExtensionError, ToolCallDecision};
 use crate::core::providers::StreamResponse;
 use crate::core::types::{ContentBlock, Message};
-use crate::extra::extensions::combinator::And;
 
 /// One unit of agent output a transport renders.
 ///
@@ -38,11 +38,14 @@ pub enum OutputEvent {
 }
 
 impl IOExtension {
-    pub fn bind(mut agent: Agent) -> (Agent, mpsc::UnboundedSender<Message>, mpsc::UnboundedReceiver<OutputEvent>) {
+    /// Construct the extension and its transport channels: `tx` feeds inbound
+    /// [`Message`]s (one per turn), `rx` drains outbound [`OutputEvent`]s. Add
+    /// the returned extension to an agent's chain **last** so its turn-end input
+    /// gating runs after every other extension.
+    pub fn new() -> (IOExtension, mpsc::UnboundedSender<Message>, mpsc::UnboundedReceiver<OutputEvent>) {
         let (event_tx, event_rx) = mpsc::unbounded_channel::<OutputEvent>();
         let (msg_tx, msg_rx) = mpsc::unbounded_channel::<Message>();
-        agent.extension = And::new(agent.extension, IOExtension { tx: event_tx, rx: msg_rx }).into();
-        (agent, msg_tx, event_rx)
+        (IOExtension { tx: event_tx, rx: msg_rx }, msg_tx, event_rx)
     }
 }
 
@@ -53,7 +56,7 @@ impl IOExtension {
 /// for the transport's ack, then takes the next inbound message and appends it
 /// to the session — driving a multi-turn conversation from outside the agent.
 ///
-/// Constructed by [`IOExtension::bind`]; a transport never builds one directly.
+/// Constructed by [`IOExtension::new`]; a transport never builds one directly.
 pub struct IOExtension {
     tx: mpsc::UnboundedSender<OutputEvent>,
     rx: mpsc::UnboundedReceiver<Message>,
@@ -110,7 +113,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
 
-    use crate::core::extensions::NoopExtension;
+    use crate::core::agent::Agent;
     use crate::core::providers::{Model, Provider, ProviderError, StreamResponse, StreamResponseStream};
     use crate::core::session::{InMemorySession, Session};
     use crate::core::tools::ToolRegistry;
@@ -187,18 +190,19 @@ mod tests {
         }
     }
 
-    /// `IOExtension::bind` + a caller-spawned `agent.prompt` task streams the
-    /// agent's output, gates on `Finish` between turns, and advances to a fresh
-    /// turn when a message arrives on the inbound channel — the transport-side
-    /// contract, independent of any concrete transport.
+    /// An `IOExtension` (from [`IOExtension::new`]) wired into an agent + a
+    /// caller-spawned `agent.prompt` task streams the agent's output, gates on
+    /// `Finish` between turns, and advances to a fresh turn when a message
+    /// arrives on the inbound channel — the transport-side contract, independent
+    /// of any concrete transport.
     #[tokio::test]
-    async fn bind_streams_output_gates_on_finish_and_feeds_next_turn() {
-        let agent = Agent {
+    async fn streams_output_gates_on_finish_and_feeds_next_turn() {
+        let (io, tx, mut rx) = IOExtension::new();
+        let mut agent = Agent {
             state: AgentState { model: model(), tools: ToolRegistry::new(), session: InMemorySession::new().arc() },
             provider: Arc::new(TextProvider(assistant("reply"))),
-            extension: Box::new(NoopExtension),
+            extension: Box::new(io),
         };
-        let (mut agent, tx, mut rx) = IOExtension::bind(agent);
 
         // The caller starts the agent task itself; the bridge carries the first prompt.
         let task = tokio::spawn(async move { agent.prompt(user("hello")).await });
