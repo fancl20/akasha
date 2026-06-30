@@ -145,9 +145,7 @@ async fn main() {
                 None => (InMemorySession::new().arc(), None, tools.clone()),
             };
 
-            // Schema + Circuit are the builder's defaults; the mux extension (when
-            // present) appends after them, matching the prior hand-built chain.
-            let mut builder = AgentBuilder::new(tier(0), provider.clone(), session).tools(tools);
+            let mut builder = AgentBuilder::base(tier(0), provider.clone(), session).tools(tools);
             if let Some(ext) = mux_ext {
                 builder = builder.extension(ext);
             }

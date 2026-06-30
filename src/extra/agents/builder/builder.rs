@@ -20,14 +20,15 @@
 //!   call the agent can use *no* tools — it must opt each one in. This keeps the
 //!   agent's reachable surface explicit while skills still see the whole pool.
 //!
-//! Extensions default to the cross-cutting combo every real agent uses —
-//! [`SchemaVerification`] then [`CircuitBreaker`] — so a bare
-//! `AgentBuilder::new(model, provider, session).build().await` already gets schema
-//! validation and output bounding. Append more with
-//! [`.extension()`](AgentBuilder::extension) (they run after the defaults), or
-//! drop the defaults entirely with
-//! [`.no_default_extensions()`](AgentBuilder::no_default_extensions).
+//! [`AgentBuilder::new`] wires **no** extensions: a bare
+//! `AgentBuilder::new(model, provider, session).build().await` runs a
+//! [`NoopExtension`]. For the cross-cutting combo every real agent uses —
+//! [`SchemaVerification`] then [`CircuitBreaker`] — start from
+//! [`AgentBuilder::base`] instead; it returns a partially-configured builder with
+//! those two already chained, and further [`.extension()`](AgentBuilder::extension)
+//! calls run after them.
 //!
+//! [`NoopExtension`]: crate::core::extensions::NoopExtension
 //! [`And`]: crate::extra::extensions::combinator::And
 //! [`SchemaVerification`]: crate::extra::extensions::schema::SchemaVerification
 //! [`CircuitBreaker`]: crate::extra::extensions::circuit_breaker::CircuitBreaker
@@ -44,10 +45,8 @@ use crate::core::session::Session;
 use crate::core::tools::{ToolHandler, ToolRegistry};
 use crate::core::types::Message;
 use crate::extra::agents::builder::SessionManager;
-use crate::extra::extensions::circuit_breaker::CircuitBreaker;
 use crate::extra::extensions::combinator::And;
 use crate::extra::extensions::io::{IOExtension, OutputEvent};
-use crate::extra::extensions::schema::SchemaVerification;
 use crate::extra::tools::mcp;
 use crate::extra::tools::mcp::config::{McpConfig, StreamableHttpConfig};
 use crate::extra::tools::skill::{self, SkillConfig};
@@ -64,11 +63,11 @@ use crate::extra::tools::subagent::{Subagent, SubagentTool};
 /// - **Main-agent tools**: none — opt tools in with
 ///   [`.tools_enable()`](AgentBuilder::tools_enable). Skills still see the full
 ///   pool regardless.
-/// - **Extensions**: [`SchemaVerification`](crate::extra::extensions::schema::SchemaVerification)
-///   then [`CircuitBreaker`](crate::extra::extensions::circuit_breaker::CircuitBreaker)
-///   (the combo every agent needs). [`.extension()`](AgentBuilder::extension)
-///   appends after them; [`.no_default_extensions()`](AgentBuilder::no_default_extensions)
-///   drops them for a bare agent.
+/// - **Extensions**: none — a bare `new().build()` runs a
+///   [`NoopExtension`](crate::core::extensions::NoopExtension). Start from
+///   [`AgentBuilder::base`] for the [`SchemaVerification`](crate::extra::extensions::schema::SchemaVerification)
+///   + [`CircuitBreaker`](crate::extra::extensions::circuit_breaker::CircuitBreaker)
+///   combo, then [`.extension()`](AgentBuilder::extension) appends after them.
 ///
 /// # Example
 ///
@@ -92,7 +91,6 @@ pub struct AgentBuilder {
     provider: Arc<dyn Provider>,
     session: Arc<Mutex<dyn Session>>,
     extensions: Vec<Box<dyn Extension>>,
-    use_default_extensions: bool,
     tools: ToolRegistry,
     /// Tools the *main* agent may call (deny-all until opted in via
     /// `tools_enable`). Skills draw from the full pool, not this subset.
@@ -114,7 +112,6 @@ impl AgentBuilder {
             provider,
             session,
             extensions: Vec::new(),
-            use_default_extensions: true,
             tools: ToolRegistry::new(),
             enabled: Vec::new(),
             skills: Vec::new(),
@@ -123,28 +120,17 @@ impl AgentBuilder {
         }
     }
 
-    /// Append `ext` to the extension chain. Extensions run in addition order;
-    /// user-added extensions run **after** the default [`SchemaVerification`] +
-    /// [`CircuitBreaker`], so a blocking extension added here (e.g. a mux
-    /// fallback) ends up innermost — matching the order a hand-built
-    /// `And(Schema, And(Circuit, ext))` would produce.
+    /// Append `ext` to the extension chain. Extensions run in addition order —
+    /// the first added runs first and gates the rest (its `on_turn_end` can
+    /// short-circuit later ones). To chain after the standard
+    /// [`SchemaVerification`] + [`CircuitBreaker`] combo, start from
+    /// [`AgentBuilder::base`]: a blocking extension added here (e.g. a mux
+    /// fallback) then ends up innermost, matching `And(Schema, And(Circuit, ext))`.
     ///
     /// [`SchemaVerification`]: crate::extra::extensions::schema::SchemaVerification
     /// [`CircuitBreaker`]: crate::extra::extensions::circuit_breaker::CircuitBreaker
     pub fn extension(mut self, ext: impl Into<Box<dyn Extension>>) -> Self {
         self.extensions.push(ext.into());
-        self
-    }
-
-    /// Drop the default [`SchemaVerification`] + [`CircuitBreaker`] extensions.
-    /// With no [`.extension()`](AgentBuilder::extension) calls the agent then
-    /// runs with a [`NoopExtension`]; use this for a bare agent or full control
-    /// over the extension chain.
-    ///
-    /// [`SchemaVerification`]: crate::extra::extensions::schema::SchemaVerification
-    /// [`CircuitBreaker`]: crate::extra::extensions::circuit_breaker::CircuitBreaker
-    pub fn no_default_extensions(mut self) -> Self {
-        self.use_default_extensions = false;
         self
     }
 
@@ -259,7 +245,7 @@ impl AgentBuilder {
         self.tools = self.tools.subset(&self.enabled);
 
         let session = self.session.clone();
-        let extension = compose(self.extensions, self.use_default_extensions);
+        let extension = compose(self.extensions);
 
         Ok(Agent {
             state: AgentState { model: self.model, tools: self.tools, session },
@@ -296,25 +282,16 @@ impl AgentBuilder {
 ///
 /// Built left-to-right with [`And`]: `compose([a, b, c]) == And(a, And(b, c))`,
 /// so `a` runs first and gates the rest (its `on_turn_end` can short-circuit
-/// `b`/`c`). When the defaults are on they are prepended as
-/// `[SchemaVerification, CircuitBreaker, …user extensions]`. An empty chain
-/// (defaults off, nothing added) yields a [`NoopExtension`].
+/// `b`/`c`). An empty chain yields a [`NoopExtension`].
 ///
 /// [`And`]: crate::extra::extensions::combinator::And
-fn compose(mut extensions: Vec<Box<dyn Extension>>, use_defaults: bool) -> Box<dyn Extension> {
-    let mut all: Vec<Box<dyn Extension>> = Vec::new();
-    if use_defaults {
-        all.push(Box::new(SchemaVerification::new()));
-        all.push(Box::new(CircuitBreaker::new()));
-    }
-    all.append(&mut extensions);
-
-    match all.len() {
+fn compose(mut extensions: Vec<Box<dyn Extension>>) -> Box<dyn Extension> {
+    match extensions.len() {
         0 => Box::new(NoopExtension),
-        1 => all.remove(0),
+        1 => extensions.remove(0),
         _ => {
-            let mut acc = all.remove(0);
-            for next in all {
+            let mut acc = extensions.remove(0);
+            for next in extensions {
                 acc = And::new(acc, next).into();
             }
             acc
@@ -520,34 +497,18 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn minimal_build_applies_standard_extensions() {
+    async fn minimal_build_is_bare() {
         let agent = AgentBuilder::new(model(), provider("hi"), session()).build().await.unwrap();
-        // Schema + Circuit compose into And; no tools enabled; model threaded through.
-        assert_eq!(agent.extension.name(), "and");
+        // new() wires no extensions → NoopExtension; no tools enabled; model threaded through.
+        assert_eq!(agent.extension.name(), "noop");
         assert!(agent.state.tools.definitions().is_empty(), "deny-all: nothing enabled");
         assert_eq!(agent.state.model.id, "m");
     }
 
     #[tokio::test]
-    async fn custom_extension_is_composed_after_defaults() {
+    async fn single_extension_used_directly() {
+        // A single opted-in extension needs no And wrapper.
         let agent = AgentBuilder::new(model(), provider("hi"), session())
-            .extension(NamedExt { name: "custom" })
-            .build()
-            .await
-            .unwrap();
-        // Defaults + 1 user extension = 3, still folded via And.
-        assert_eq!(agent.extension.name(), "and");
-    }
-
-    #[tokio::test]
-    async fn no_default_extensions_gives_bare_agent() {
-        let agent =
-            AgentBuilder::new(model(), provider("hi"), session()).no_default_extensions().build().await.unwrap();
-        assert_eq!(agent.extension.name(), "noop");
-
-        // A single opted-in extension is used directly (no And wrapper).
-        let agent = AgentBuilder::new(model(), provider("hi"), session())
-            .no_default_extensions()
             .extension(NamedExt { name: "custom" })
             .build()
             .await
@@ -556,10 +517,21 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn multiple_extensions_fold_via_and() {
+        // Two or more extensions fold left-to-right via And.
+        let agent = AgentBuilder::new(model(), provider("hi"), session())
+            .extension(NamedExt { name: "a" })
+            .extension(NamedExt { name: "b" })
+            .build()
+            .await
+            .unwrap();
+        assert_eq!(agent.extension.name(), "and");
+    }
+
+    #[tokio::test]
     async fn main_agent_denies_all_tools_by_default() {
         // Tools registered but never enabled => the main agent sees none.
         let agent = AgentBuilder::new(model(), provider("hi"), session())
-            .no_default_extensions()
             .tool(StubTool { name: "a" })
             .tool(StubTool { name: "b" })
             .build()
@@ -571,7 +543,6 @@ mod tests {
     #[tokio::test]
     async fn tools_enable_exposes_only_named_tools() {
         let agent = AgentBuilder::new(model(), provider("hi"), session())
-            .no_default_extensions()
             .tool(StubTool { name: "a" })
             .tool(StubTool { name: "b" })
             .tool(StubTool { name: "c" })
@@ -587,7 +558,6 @@ mod tests {
     #[tokio::test]
     async fn tools_enable_accumulates_across_calls() {
         let agent = AgentBuilder::new(model(), provider("hi"), session())
-            .no_default_extensions()
             .tool(StubTool { name: "a" })
             .tool(StubTool { name: "b" })
             .tools_enable(["a"])
@@ -605,7 +575,6 @@ mod tests {
         let mut seed = ToolRegistry::new();
         seed.register(StubTool { name: "a" }.into());
         let agent = AgentBuilder::new(model(), provider("hi"), session())
-            .no_default_extensions()
             .tools(seed)
             .tool(StubTool { name: "b" })
             .tools_enable(["a", "b"])
@@ -621,7 +590,6 @@ mod tests {
     async fn subagent_registers_but_needs_enabling() {
         // Registered into the pool, but invisible to the main agent until enabled.
         let agent = AgentBuilder::new(model(), provider("hi"), session())
-            .no_default_extensions()
             .subagent(manager(), EchoSubagent { definition: def("echo") })
             .build()
             .await
@@ -629,7 +597,6 @@ mod tests {
         assert!(agent.state.tools.get("echo").is_none(), "not enabled => hidden");
 
         let agent = AgentBuilder::new(model(), provider("hi"), session())
-            .no_default_extensions()
             .subagent(manager(), EchoSubagent { definition: def("echo") })
             .tools_enable(["echo"])
             .build()
@@ -642,7 +609,6 @@ mod tests {
     async fn skills_register_and_are_callable_when_enabled() {
         let (guard, cfg) = skill_dir("alpha");
         let agent = AgentBuilder::new(model(), provider("hi"), session())
-            .no_default_extensions()
             .skills(manager(), cfg)
             .tools_enable(["alpha"])
             .build()
@@ -663,7 +629,7 @@ mod tests {
         .unwrap();
         let main = main.arc();
 
-        let agent = AgentBuilder::new(model(), provider("hi"), main).no_default_extensions().build().await.unwrap();
+        let agent = AgentBuilder::new(model(), provider("hi"), main).build().await.unwrap();
         let count = agent.state.session.lock().unwrap().messages().count();
         assert_eq!(count, 1, "the seeded session is preserved, not replaced");
     }
@@ -702,7 +668,6 @@ mod tests {
     #[tokio::test]
     async fn build_then_prompt_runs_one_turn() {
         let mut agent = AgentBuilder::new(model(), provider("hello there"), session())
-            .no_default_extensions()
             .build()
             .await
             .unwrap();
@@ -732,16 +697,16 @@ mod tests {
     }
 
     /// `bind_io` appends an `IOExtension` (as a regular extension) and returns
-    /// `(builder, rx, tx)`; `build()` then wires it last over the default
-    /// extensions. Driving the agent streams output through `rx`, a `Finish`
-    /// handshake gates the turn, and a message on `tx` advances to the next turn.
+    /// `(builder, rx, tx)`; `build()` then wires it as the agent's extension.
+    /// Driving the agent streams output through `rx`, a `Finish` handshake gates
+    /// the turn, and a message on `tx` advances to the next turn.
     #[tokio::test]
     async fn bind_io_returns_drivable_agent_and_channels() {
         let (builder, mut rx, tx) = AgentBuilder::new(model(), provider("reply"), session()).bind_io();
         let mut agent = builder.build().await.unwrap();
 
-        // io is wired last over the default Schema + Circuit extensions → And.
-        assert_eq!(agent.extension.name(), "and");
+        // io is the sole extension → used directly.
+        assert_eq!(agent.extension.name(), "io");
 
         // The caller starts the agent task itself; the bridge carries the first prompt.
         let task = tokio::spawn(async move { agent.prompt(user_msg("hello")).await });
