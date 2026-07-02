@@ -35,7 +35,7 @@ use crate::core::tools::{ToolError, ToolHandler, ToolRegistry};
 use crate::core::types::{ContentBlock, Message, TextContent, ToolDefinition, ToolResult, ToolResultContent};
 use crate::extra::agents::builder::SessionManager;
 use crate::extra::extensions::combinator::And;
-use crate::extra::extensions::control::{stop_message, ControlExtension};
+use crate::extra::extensions::control::{ControlExtension, stop_message};
 use crate::extra::extensions::schema::SchemaVerification;
 
 /// The fixed name of the yield tool injected into every subagent run.
@@ -96,16 +96,18 @@ impl SubagentTool {
     /// Resolve the fork for this call: resume by `session_id` when the parent
     /// echoes one (and it exists), else fork the main session. Returns the id,
     /// the drivable session, and whether this is a resume.
-    fn resolve(&self, session_id: Option<&str>) -> Result<(String, Arc<Mutex<dyn crate::core::session::Session>>, bool), ToolError> {
+    fn resolve(
+        &self,
+        session_id: Option<&str>,
+    ) -> Result<(String, Arc<Mutex<dyn crate::core::session::Session>>, bool), ToolError> {
         let mut mgr = self.manager.lock().unwrap();
         if let Some(id) = session_id {
             if let Ok(session) = mgr.get(id) {
                 return Ok((id.to_string(), session, true));
             }
         }
-        let (id, session) = mgr
-            .fork()
-            .map_err(|e| ToolError::Execution(format!("failed to fork subagent session: {e}")))?;
+        let (id, session) =
+            mgr.fork().map_err(|e| ToolError::Execution(format!("failed to fork subagent session: {e}")))?;
         Ok((id, session, false))
     }
 }
@@ -124,18 +126,18 @@ impl ToolHandler for SubagentTool {
     // call's args against the input schema but never validates the result (the
     // subagent's own run already validated the yield against the output schema).
 
-    async fn execute(&self, _cancel: oneshot::Receiver<bool>, params: serde_json::Value) -> Result<ToolResult, ToolError> {
+    async fn execute(
+        &self,
+        _cancel: oneshot::Receiver<bool>,
+        params: serde_json::Value,
+    ) -> Result<ToolResult, ToolError> {
         let session_id = params.get(SESSION_ID).and_then(|v| v.as_str()).map(str::to_string);
         let (id, session, is_resume) = self.resolve(session_id.as_deref())?;
 
         // Spawn only: a stop control message drops the inherited main prefix from the
         // subagent's provider view, so it runs isolated while the branch keeps the lineage.
         if !is_resume {
-            session
-                .lock()
-                .unwrap()
-                .append(stop_message())
-                .map_err(|e| ToolError::Execution(e.to_string()))?;
+            session.lock().unwrap().append(stop_message()).map_err(|e| ToolError::Execution(e.to_string()))?;
         }
 
         // Strip the orchestration field so the subagent only sees its own input.
@@ -252,7 +254,11 @@ impl ToolHandler for YieldTool {
         }
     }
 
-    async fn execute(&self, _cancel: oneshot::Receiver<bool>, params: serde_json::Value) -> Result<ToolResult, ToolError> {
+    async fn execute(
+        &self,
+        _cancel: oneshot::Receiver<bool>,
+        params: serde_json::Value,
+    ) -> Result<ToolResult, ToolError> {
         let mut slot = self.yielded.lock().unwrap();
         if slot.is_none() {
             *slot = Some(params);
@@ -365,7 +371,12 @@ mod tests {
                 if msg.content.iter().any(|b| matches!(b, ContentBlock::ToolCall(_))) { "tool_calls" } else { "stop" };
             Ok(Box::pin(stream::iter(vec![StreamResponse {
                 message: msg,
-                usage: TokenUsage { input_tokens: 0, output_tokens: 0, cache_read_tokens: None, cache_write_tokens: None },
+                usage: TokenUsage {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                },
                 stop_reason: Some(stop.to_string()),
             }])))
         }
@@ -421,15 +432,24 @@ mod tests {
     fn tool_call(name: &str, args: serde_json::Value) -> Message {
         Message {
             role: "assistant".to_string(),
-            content: vec![ContentBlock::ToolCall(ToolCall { id: "call".to_string(), name: name.to_string(), arguments: args })],
+            content: vec![ContentBlock::ToolCall(ToolCall {
+                id: "call".to_string(),
+                name: name.to_string(),
+                arguments: args,
+            })],
         }
     }
 
     fn text_result(result: &ToolResult) -> String {
-        result.content.iter().filter_map(|c| match c {
-            ToolResultContent::Text(t) => Some(t.content.clone()),
-            _ => None,
-        }).collect::<Vec<_>>().join("")
+        result
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                ToolResultContent::Text(t) => Some(t.content.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("")
     }
 
     fn parse(result: &ToolResult) -> serde_json::Value {
@@ -444,11 +464,12 @@ mod tests {
             tool_call(YIELD_TOOL, serde_json::json!({"result": "a"})),
             tool_call(YIELD_TOOL, serde_json::json!({"result": "b"})),
         ]));
-        let tool = SubagentTool::new(model(), provider, manager(), EchoSubagent {
-            definition: def(),
-            output: None,
-            seeded_resume: Arc::new(Mutex::new(vec![])),
-        });
+        let tool = SubagentTool::new(
+            model(),
+            provider,
+            manager(),
+            EchoSubagent { definition: def(), output: None, seeded_resume: Arc::new(Mutex::new(vec![])) },
+        );
 
         let (_, rx) = oneshot::channel();
         let r1 = tool.execute(rx, serde_json::json!({"input": "q1"})).await.unwrap();
@@ -475,11 +496,12 @@ mod tests {
 
         let provider = Arc::new(ScriptedProvider::new(vec![tool_call(YIELD_TOOL, serde_json::json!({"result": "x"}))]));
         let seen = provider.seen_texts.clone();
-        let tool = SubagentTool::new(model(), provider, mgr, EchoSubagent {
-            definition: def(),
-            output: None,
-            seeded_resume: Arc::new(Mutex::new(vec![])),
-        });
+        let tool = SubagentTool::new(
+            model(),
+            provider,
+            mgr,
+            EchoSubagent { definition: def(), output: None, seeded_resume: Arc::new(Mutex::new(vec![])) },
+        );
 
         let (_, rx) = oneshot::channel();
         tool.execute(rx, serde_json::json!({"input": "q"})).await.unwrap();
@@ -494,12 +516,14 @@ mod tests {
 
     #[tokio::test]
     async fn yield_captures_result_and_stamps_session_id() {
-        let provider = Arc::new(ScriptedProvider::new(vec![tool_call(YIELD_TOOL, serde_json::json!({"result": "the answer"}))]));
-        let tool = SubagentTool::new(model(), provider, manager(), EchoSubagent {
-            definition: def(),
-            output: None,
-            seeded_resume: Arc::new(Mutex::new(vec![])),
-        });
+        let provider =
+            Arc::new(ScriptedProvider::new(vec![tool_call(YIELD_TOOL, serde_json::json!({"result": "the answer"}))]));
+        let tool = SubagentTool::new(
+            model(),
+            provider,
+            manager(),
+            EchoSubagent { definition: def(), output: None, seeded_resume: Arc::new(Mutex::new(vec![])) },
+        );
 
         let (_, rx) = oneshot::channel();
         let result = tool.execute(rx, serde_json::json!({"input": "q"})).await.unwrap();
@@ -517,11 +541,18 @@ mod tests {
             tool_call(YIELD_TOOL, serde_json::json!({"x": "not-an-int"})),
             tool_call(YIELD_TOOL, serde_json::json!({"x": 7})),
         ]));
-        let tool = SubagentTool::new(model(), provider, manager(), EchoSubagent {
-            definition: def(),
-            output: Some(serde_json::json!({"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]})),
-            seeded_resume: Arc::new(Mutex::new(vec![])),
-        });
+        let tool = SubagentTool::new(
+            model(),
+            provider,
+            manager(),
+            EchoSubagent {
+                definition: def(),
+                output: Some(
+                    serde_json::json!({"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]}),
+                ),
+                seeded_resume: Arc::new(Mutex::new(vec![])),
+            },
+        );
 
         let (_, rx) = oneshot::channel();
         let result = tool.execute(rx, serde_json::json!({"input": "q"})).await.unwrap();
@@ -535,11 +566,12 @@ mod tests {
             role: "assistant".to_string(),
             content: vec![ContentBlock::Text(TextContent { content: "I give up".to_string() })],
         }]));
-        let tool = SubagentTool::new(model(), provider, manager(), EchoSubagent {
-            definition: def(),
-            output: None,
-            seeded_resume: Arc::new(Mutex::new(vec![])),
-        });
+        let tool = SubagentTool::new(
+            model(),
+            provider,
+            manager(),
+            EchoSubagent { definition: def(), output: None, seeded_resume: Arc::new(Mutex::new(vec![])) },
+        );
 
         let (_, rx) = oneshot::channel();
         let result = tool.execute(rx, serde_json::json!({"input": "q"})).await.unwrap();
@@ -555,11 +587,12 @@ mod tests {
         ]));
         let counts = provider.seen_counts.clone();
         let seeded = Arc::new(Mutex::new(vec![]));
-        let tool = SubagentTool::new(model(), provider, manager(), EchoSubagent {
-            definition: def(),
-            output: None,
-            seeded_resume: seeded.clone(),
-        });
+        let tool = SubagentTool::new(
+            model(),
+            provider,
+            manager(),
+            EchoSubagent { definition: def(), output: None, seeded_resume: seeded.clone() },
+        );
 
         // Spawn.
         let (_, rx) = oneshot::channel();
@@ -587,11 +620,12 @@ mod tests {
             tool_call(YIELD_TOOL, serde_json::json!({"result": "r1"})),
             tool_call(YIELD_TOOL, serde_json::json!({"result": "r2"})),
         ]));
-        let tool = SubagentTool::new(model(), provider, manager(), EchoSubagent {
-            definition: def(),
-            output: None,
-            seeded_resume: Arc::new(Mutex::new(vec![])),
-        });
+        let tool = SubagentTool::new(
+            model(),
+            provider,
+            manager(),
+            EchoSubagent { definition: def(), output: None, seeded_resume: Arc::new(Mutex::new(vec![])) },
+        );
 
         let (_, rx) = oneshot::channel();
         let r1 = tool.execute(rx, serde_json::json!({"input": "q1"})).await.unwrap();
@@ -607,11 +641,12 @@ mod tests {
 
     #[test]
     fn definition_merges_session_id() {
-        let tool = SubagentTool::new(model(), Arc::new(ScriptedProvider::new(vec![])), manager(), EchoSubagent {
-            definition: def(),
-            output: None,
-            seeded_resume: Arc::new(Mutex::new(vec![])),
-        });
+        let tool = SubagentTool::new(
+            model(),
+            Arc::new(ScriptedProvider::new(vec![])),
+            manager(),
+            EchoSubagent { definition: def(), output: None, seeded_resume: Arc::new(Mutex::new(vec![])) },
+        );
         let params = tool.definition().parameters;
         assert!(params["properties"]["session_id"]["type"].is_string(), "session_id is a declared parameter");
         assert_eq!(tool.definition().name, "echo");
@@ -620,11 +655,13 @@ mod tests {
     #[test]
     fn registers_as_a_named_handler() {
         let mut registry = ToolRegistry::new();
-        register(&mut registry, model(), Arc::new(ScriptedProvider::new(vec![])), manager(), EchoSubagent {
-            definition: def(),
-            output: None,
-            seeded_resume: Arc::new(Mutex::new(vec![])),
-        });
+        register(
+            &mut registry,
+            model(),
+            Arc::new(ScriptedProvider::new(vec![])),
+            manager(),
+            EchoSubagent { definition: def(), output: None, seeded_resume: Arc::new(Mutex::new(vec![])) },
+        );
         assert!(registry.get("echo").is_some());
         assert_eq!(registry.definitions().len(), 1);
     }

@@ -167,11 +167,7 @@ fn discover_into(dir: &Path, out: &mut Vec<ParsedSkill>) -> Result<(), SkillErro
     }
 
     let mut subdirs: Vec<PathBuf> = match std::fs::read_dir(dir) {
-        Ok(rd) => rd
-            .filter_map(|e| e.ok())
-            .map(|e| e.path())
-            .filter(|p| p.is_dir())
-            .collect(),
+        Ok(rd) => rd.filter_map(|e| e.ok()).map(|e| e.path()).filter(|p| p.is_dir()).collect(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(SkillError::Io(e)),
     };

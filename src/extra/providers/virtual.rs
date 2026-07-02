@@ -129,7 +129,8 @@ mod tests {
         let seen = Arc::new(Mutex::new(Vec::new()));
         let vp = VirtualProvider::new("virtual").provider("a", backend(seen.clone()));
 
-        drain(vp.stream(&request("a", "model-a"), Box::new(std::iter::empty::<&Message>()), &vec![]).await.unwrap()).await;
+        drain(vp.stream(&request("a", "model-a"), Box::new(std::iter::empty::<&Message>()), &vec![]).await.unwrap())
+            .await;
 
         // The backend received the exact model the caller streamed with — no remapping.
         let observed = seen.lock().unwrap().clone();
@@ -164,8 +165,10 @@ mod tests {
             .provider("a", Arc::new(RecordingProvider { name: "a", seen: seen_a.clone() }))
             .provider("b", Arc::new(RecordingProvider { name: "b", seen: seen_b.clone() }));
 
-        drain(vp.stream(&request("a", "model-a"), Box::new(std::iter::empty::<&Message>()), &vec![]).await.unwrap()).await;
-        drain(vp.stream(&request("b", "model-b"), Box::new(std::iter::empty::<&Message>()), &vec![]).await.unwrap()).await;
+        drain(vp.stream(&request("a", "model-a"), Box::new(std::iter::empty::<&Message>()), &vec![]).await.unwrap())
+            .await;
+        drain(vp.stream(&request("b", "model-b"), Box::new(std::iter::empty::<&Message>()), &vec![]).await.unwrap())
+            .await;
 
         assert_eq!(seen_a.lock().unwrap().len(), 1);
         assert_eq!(seen_a.lock().unwrap()[0].id, "model-a");
