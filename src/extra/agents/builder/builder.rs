@@ -46,7 +46,7 @@ use crate::core::tools::{ToolHandler, ToolRegistry};
 use crate::core::types::Message;
 use crate::extra::agents::builder::SessionManager;
 use crate::extra::extensions::combinator::And;
-use crate::extra::extensions::io::{IOExtension, OutputEvent};
+use crate::extra::extensions::io::{IoExtension, OutputEvent};
 use crate::extra::tools::mcp;
 use crate::extra::tools::mcp::config::{McpConfig, StreamableHttpConfig};
 use crate::extra::tools::skill::{self, SkillConfig};
@@ -228,15 +228,8 @@ impl AgentBuilder {
         // main agent's own view, applied below.
         let base = self.tools.clone();
         for (manager, config) in std::mem::take(&mut self.skills) {
-            skill::register(
-                &mut self.tools,
-                &config,
-                self.model.clone(),
-                self.provider.clone(),
-                base.clone(),
-                manager,
-            )
-            .with_context(|| format!("registering skills under '{}'", config.dir.display()))?;
+            skill::register(&mut self.tools, &config, self.model.clone(), self.provider.clone(), base.clone(), manager)
+                .with_context(|| format!("registering skills under '{}'", config.dir.display()))?;
         }
 
         // The main agent sees only its explicitly enabled tools. With no
@@ -254,7 +247,7 @@ impl AgentBuilder {
         })
     }
 
-    /// Wire an [`IOExtension`] into the chain and return the transport channels
+    /// Wire an [`IoExtension`] into the chain and return the transport channels
     /// as `(rx, tx)`:
     ///
     /// - `rx` — outbound [`OutputEvent`]s (streamed content, tool notices, turn
@@ -269,11 +262,11 @@ impl AgentBuilder {
     /// the channels. The bridge owns no task; the caller spawns
     /// `agent.prompt(first)` itself at `build()` time.
     ///
-    /// [`IOExtension`]: crate::extra::extensions::io::IOExtension
+    /// [`IoExtension`]: crate::extra::extensions::io::IoExtension
     /// [`OutputEvent`]: crate::extra::extensions::io::OutputEvent
     /// [`Message`]: crate::core::types::Message
     pub fn bind_io(self) -> (Self, mpsc::UnboundedReceiver<OutputEvent>, mpsc::UnboundedSender<Message>) {
-        let (io, tx, rx) = IOExtension::new();
+        let (io, tx, rx) = IoExtension::new();
         (self.extension(io), rx, tx)
     }
 }
@@ -667,10 +660,7 @@ mod tests {
 
     #[tokio::test]
     async fn build_then_prompt_runs_one_turn() {
-        let mut agent = AgentBuilder::new(model(), provider("hello there"), session())
-            .build()
-            .await
-            .unwrap();
+        let mut agent = AgentBuilder::new(model(), provider("hello there"), session()).build().await.unwrap();
         agent
             .prompt(Message {
                 role: "user".to_string(),
@@ -696,7 +686,7 @@ mod tests {
         }
     }
 
-    /// `bind_io` appends an `IOExtension` (as a regular extension) and returns
+    /// `bind_io` appends an `IoExtension` (as a regular extension) and returns
     /// `(builder, rx, tx)`; `build()` then wires it as the agent's extension.
     /// Driving the agent streams output through `rx`, a `Finish` handshake gates
     /// the turn, and a message on `tx` advances to the next turn.

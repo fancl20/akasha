@@ -1,11 +1,11 @@
 //! Channel-backed I/O bridge between an [`Agent`] and any transport.
 //!
-//! [`IOExtension`] wires an agent's streaming output and turn-by-turn input to a
+//! [`IoExtension`] wires an agent's streaming output and turn-by-turn input to a
 //! pair of unbounded channels: content blocks and tool-call notifications flow
 //! **out** as [`OutputEvent`]s, and the next user message flows **in** at each
 //! turn boundary.
 //!
-//! [`IOExtension::new`] returns the extension alongside the inbound message
+//! [`IoExtension::new`] returns the extension alongside the inbound message
 //! sender and the outbound event receiver; add it to an agent's extension chain
 //! **last**, so its turn-end input gating runs after every other extension. The
 //! caller spawns `agent.prompt(first)` itself — the bridge owns no task of its
@@ -37,15 +37,15 @@ pub enum OutputEvent {
     Finish(oneshot::Sender<Result<(), ExtensionError>>),
 }
 
-impl IOExtension {
+impl IoExtension {
     /// Construct the extension and its transport channels: `tx` feeds inbound
     /// [`Message`]s (one per turn), `rx` drains outbound [`OutputEvent`]s. Add
     /// the returned extension to an agent's chain **last** so its turn-end input
     /// gating runs after every other extension.
-    pub fn new() -> (IOExtension, mpsc::UnboundedSender<Message>, mpsc::UnboundedReceiver<OutputEvent>) {
+    pub fn new() -> (IoExtension, mpsc::UnboundedSender<Message>, mpsc::UnboundedReceiver<OutputEvent>) {
         let (event_tx, event_rx) = mpsc::unbounded_channel::<OutputEvent>();
         let (msg_tx, msg_rx) = mpsc::unbounded_channel::<Message>();
-        (IOExtension { tx: event_tx, rx: msg_rx }, msg_tx, event_rx)
+        (IoExtension { tx: event_tx, rx: msg_rx }, msg_tx, event_rx)
     }
 }
 
@@ -56,8 +56,8 @@ impl IOExtension {
 /// for the transport's ack, then takes the next inbound message and appends it
 /// to the session — driving a multi-turn conversation from outside the agent.
 ///
-/// Constructed by [`IOExtension::new`]; a transport never builds one directly.
-pub struct IOExtension {
+/// Constructed by [`IoExtension::new`]; a transport never builds one directly.
+pub struct IoExtension {
     tx: mpsc::UnboundedSender<OutputEvent>,
     rx: mpsc::UnboundedReceiver<Message>,
 }
@@ -67,7 +67,7 @@ fn dropped() -> ExtensionError {
 }
 
 #[async_trait]
-impl Extension for IOExtension {
+impl Extension for IoExtension {
     fn name(&self) -> &str {
         "io"
     }
@@ -190,14 +190,14 @@ mod tests {
         }
     }
 
-    /// An `IOExtension` (from [`IOExtension::new`]) wired into an agent + a
+    /// An `IoExtension` (from [`IoExtension::new`]) wired into an agent + a
     /// caller-spawned `agent.prompt` task streams the agent's output, gates on
     /// `Finish` between turns, and advances to a fresh turn when a message
     /// arrives on the inbound channel — the transport-side contract, independent
     /// of any concrete transport.
     #[tokio::test]
     async fn streams_output_gates_on_finish_and_feeds_next_turn() {
-        let (io, tx, mut rx) = IOExtension::new();
+        let (io, tx, mut rx) = IoExtension::new();
         let mut agent = Agent {
             state: AgentState { model: model(), tools: ToolRegistry::new(), session: InMemorySession::new().arc() },
             provider: Arc::new(TextProvider(assistant("reply"))),
