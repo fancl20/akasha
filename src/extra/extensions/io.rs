@@ -1,9 +1,9 @@
 //! Channel-backed I/O bridge between an [`Agent`] and any transport.
 //!
 //! [`IoExtension`] wires an agent's streaming output and turn-by-turn input to a
-//! pair of unbounded channels: content blocks and tool-call notifications flow
-//! **out** as [`OutputEvent`]s, and the next user message flows **in** at each
-//! turn boundary.
+//! pair of unbounded channels: content blocks and tool-call results flow **out**
+//! as [`OutputEvent`]s, and the next user message flows **in** at each turn
+//! boundary.
 //!
 //! [`IoExtension::new`] returns the extension alongside the inbound message
 //! sender and the outbound event receiver; add it to an agent's extension chain
@@ -19,9 +19,10 @@ use async_trait::async_trait;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::core::agent::AgentState;
-use crate::core::extensions::{Extension, ExtensionError, ToolCallDecision};
+use crate::core::extensions::{Extension, ExtensionError};
 use crate::core::providers::StreamResponse;
-use crate::core::types::{ContentBlock, Message};
+use crate::core::tools::ToolError;
+use crate::core::types::{ContentBlock, Message, TextContent, ToolResult, ToolResultContent};
 
 /// One unit of agent output a transport renders.
 ///
@@ -29,10 +30,16 @@ use crate::core::types::{ContentBlock, Message};
 /// the turn's output; the agent then waits for the next inbound message before
 /// continuing, gating the conversation to the transport's pace.
 pub enum OutputEvent {
-    /// A streamed content block from the assistant message in progress.
+    /// A streamed content block from the assistant message in progress. A
+    /// `ContentBlock::ToolCall` here opens a tool call; its matching [`ToolEnd`]
+    /// carries the result.
+    ///
+    /// [`ToolEnd`]: OutputEvent::ToolEnd
     Append(ContentBlock),
-    /// A tool was called; a transport may surface it as an activity notice.
-    Notification(String),
+    /// A tool call resolved — its result is ready to render. Paired with an
+    /// earlier `Append(ContentBlock::ToolCall)` carrying the same `id`. Emitted
+    /// for both successful and failed executions (`is_error` set on failure).
+    ToolEnd { id: String, result: ToolResult },
     /// The agent finished a turn. Ack the sender once the output is flushed.
     Finish(oneshot::Sender<Result<(), ExtensionError>>),
 }
@@ -79,15 +86,27 @@ impl Extension for IoExtension {
         Ok(())
     }
 
-    async fn on_tool_execution_start(
+    async fn tool_execution_end(
         &mut self,
-        _tool_call_id: &str,
-        name: &str,
-        args: &serde_json::Value,
-    ) -> Result<ToolCallDecision, ExtensionError> {
-        let notification = format!("{name}: {args}");
-        self.tx.send(OutputEvent::Notification(notification)).map_err(|_| dropped())?;
-        Ok(ToolCallDecision::Allow)
+        tool_call_id: &str,
+        result: Result<ToolResult, ToolError>,
+    ) -> Result<Result<ToolResult, ToolError>, ExtensionError> {
+        // Surface the resolved tool call to the transport — synthesizing an
+        // error `ToolResult` for failures, since the agent only constructs that
+        // shape after this hook returns (see `agent_loop`). The reducer marks
+        // status from `is_error`. The original `result` is passed through
+        // unchanged so Schema/Circuit (run earlier in the chain) see the raw
+        // outcome; here we only observe it for rendering.
+        let view = match &result {
+            Ok(r) => r.clone(),
+            Err(e) => ToolResult {
+                tool_call_id: Some(tool_call_id.to_string()),
+                content: vec![ToolResultContent::Text(TextContent { content: e.to_string() })],
+                is_error: true,
+            },
+        };
+        self.tx.send(OutputEvent::ToolEnd { id: tool_call_id.to_string(), result: view }).map_err(|_| dropped())?;
+        Ok(result)
     }
 
     async fn on_turn_end(&mut self, state: AgentState) -> Result<AgentState, ExtensionError> {
@@ -221,5 +240,46 @@ mod tests {
         assert!(matches!(next(&mut rx).await, OutputEvent::Finish(_)), "turn 2 also finishes");
 
         task.abort();
+    }
+
+    /// `tool_execution_end` emits a `ToolEnd` carrying the result for both
+    /// success and failure, and passes the original result through unchanged.
+    #[tokio::test]
+    async fn tool_execution_end_emits_tool_end_and_passes_through() {
+        use crate::core::tools::ToolError;
+        use crate::core::types::{ToolResult, ToolResultContent};
+
+        let (io, _tx, mut rx) = IoExtension::new();
+        let mut ext: Box<dyn Extension> = Box::new(io);
+
+        // Success: emits ToolEnd with the result; passthrough preserves the Ok.
+        let ok = ToolResult {
+            tool_call_id: None,
+            content: vec![ToolResultContent::Text(TextContent { content: "ok".to_string() })],
+            is_error: false,
+        };
+        let out = ext.tool_execution_end("c1", Ok(ok.clone())).await.unwrap().unwrap();
+        assert_eq!(out.content, ok.content);
+        match rx.try_recv() {
+            Ok(OutputEvent::ToolEnd { id, result }) => {
+                assert_eq!(id, "c1");
+                assert!(!result.is_error);
+            }
+            _ => panic!("expected ToolEnd for the ok result"),
+        }
+
+        // Failure: synthesizes an error ToolEnd; passthrough keeps the Err.
+        let err = ext.tool_execution_end("c2", Err(ToolError::Execution("boom".to_string()))).await;
+        assert!(err.is_ok(), "passthrough wraps the inner Err in Ok");
+        assert!(matches!(err.unwrap(), Err(ToolError::Execution(_))));
+        match rx.try_recv() {
+            Ok(OutputEvent::ToolEnd { id, result }) => {
+                assert_eq!(id, "c2");
+                assert!(result.is_error, "failure surfaces as an error result");
+            }
+            _ => panic!("expected ToolEnd for the err result"),
+        }
+
+        assert!(rx.try_recv().is_err(), "no further events emitted");
     }
 }

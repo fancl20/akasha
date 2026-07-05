@@ -8,21 +8,36 @@ use teloxide::sugar::request::RequestLinkPreviewExt;
 use teloxide::types::{ChatAction, ChatId, Message as TgMessage, MessageId, Update, User};
 use teloxide::utils::command::BotCommands;
 use teloxide::{ApiError, Bot, RequestError, dptree};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 
 use crate::core::types::{ContentBlock, Message, TextContent};
 use crate::extra::agents::builder::AgentBuilder;
-use crate::extra::extensions::io::OutputEvent;
+use crate::extra::frontend::viewmodel::{Block, InputRouter, Step, Turn, ViewModel};
 
-/// Background task: receives events from the channel, batches them,
-/// and flushes to Telegram with throttling.
-async fn update_chat(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<OutputEvent>) {
-    let mut pending = String::new();
-    let mut message_id = None;
-    let mut wait_until = SystemTime::UNIX_EPOCH;
+/// A Telegram-flavored flattening of a turn's blocks into one message: assistant
+/// text verbatim, tool calls as `name: args` (rendered when the call is triggered,
+/// matching the prior tool-notification). Reasoning is skipped.
+fn render_turn(turn: &Turn) -> String {
+    let mut out = String::new();
+    for block in &turn.blocks {
+        match block {
+            Block::Text(t) => out.push_str(&t.content),
+            Block::Reasoning(_) => {}
+            Block::ToolCall(tc) => {
+                let note = format!("{}: {}", tc.call.name, tc.call.arguments);
+                out.push_str(&note[..note.ceil_char_boundary(512)]);
+            }
+        }
+    }
+    out
+}
 
-    let update_message = async |id: Option<MessageId>, sending: &str| match (id, sending) {
+/// Edit `id` in place when `Some`, else send a new message. Empty `sending` is a
+/// no-op. Returns the message id to keep editing (which may be `None` on a send
+/// failure, so the next call retries as a fresh send).
+async fn update_message(bot: &Bot, chat_id: ChatId, id: Option<MessageId>, sending: &str) -> Option<MessageId> {
+    match (id, sending) {
         (_, "") => id,
         (Some(id), sending) => {
             match bot.edit_message_text(chat_id, id, sending).disable_link_preview(true).await {
@@ -38,50 +53,44 @@ async fn update_chat(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<
                 None
             }
         },
-    };
+    }
+}
+
+/// Background task: steps the view model and renders the live turn to Telegram
+/// with throttled edits, flushing and acking each finished turn.
+///
+/// `sealed` is the byte offset into the rendered turn already committed to prior
+/// messages; the live message edits only the tail past it. When that tail would
+/// exceed Telegram's 4095-char cap it is sealed (the offset advances and
+/// `message_id` resets) and the remainder continues in a fresh message — one
+/// chunk per throttle window while streaming, the whole tail on finish. The
+/// offset resets each turn.
+async fn update_chat(bot: Bot, chat_id: ChatId, mut vm: ViewModel) {
+    let mut message_id = None;
+    let mut sealed = 0usize;
+    let mut wait_until = SystemTime::UNIX_EPOCH;
 
     loop {
-        let event = match rx.try_recv() {
-            Ok(msg) => Some(msg),
-            Err(mpsc::error::TryRecvError::Empty) => rx.recv().await,
-            Err(mpsc::error::TryRecvError::Disconnected) => None,
+        let (id, finish) = match vm.step().await {
+            None => return,
+            Some(Step::TurnFinished { id }) => (id, true),
+            Some(Step::Updated { id }) if SystemTime::now() >= wait_until => (id, false),
+            Some(Step::AgentEnded { .. }) => return,
+            Some(_) => continue,
         };
 
-        let mut finish_tx = None;
-        match event {
-            Some(OutputEvent::Append(ContentBlock::Text(t))) => pending.push_str(&t.content),
-            Some(OutputEvent::Append(ContentBlock::Reasoning { .. })) => {} // Allow reasoning event to trigger typing action.
-            Some(OutputEvent::Append(..)) => continue,
-            Some(OutputEvent::Notification(t)) if pending.is_empty() => {
-                message_id = update_message(message_id, &t[..t.ceil_char_boundary(512)]).await
-            }
-            Some(OutputEvent::Finish(done)) => {
-                finish_tx = Some(done);
-                pending.push('\n');
-                wait_until = SystemTime::UNIX_EPOCH;
-            }
-            None if pending.trim().is_empty() => return,
-            _ => wait_until = SystemTime::UNIX_EPOCH,
-        }
-
-        if SystemTime::now() < wait_until {
-            continue;
-        }
-
-        while !pending.trim().is_empty() {
-            let end = pending.char_indices().nth(4095).map(|(i, c)| i + c.len_utf8());
-            let boundary =
-                pending[..end.unwrap_or(pending.len())].rfind("\n").map(|i| i + 1).or(end).unwrap_or(pending.len());
-
-            message_id = update_message(message_id, pending[..boundary].trim()).await;
+        let text = vm.transcript(id).and_then(|t| t.turns.last().map(render_turn)).unwrap_or_default();
+        while !text[sealed..].trim().is_empty() {
+            let rest = &text[sealed..];
+            let end = rest.char_indices().nth(4095).map(|(i, c)| i + c.len_utf8());
+            let boundary = rest[..end.unwrap_or(rest.len())].rfind('\n').map(|i| i + 1).or(end).unwrap_or(rest.len());
+            message_id = update_message(&bot, chat_id, message_id, rest[..boundary].trim()).await;
             wait_until = SystemTime::now() + Duration::from_secs(4);
-
             if end.is_some() {
                 message_id = None;
-                pending = pending[boundary..].to_owned();
+                sealed += boundary;
             }
-
-            if finish_tx.is_none() || end.is_none() {
+            if !finish || end.is_none() {
                 break;
             }
         }
@@ -92,11 +101,10 @@ async fn update_chat(bot: Bot, chat_id: ChatId, mut rx: mpsc::UnboundedReceiver<
             wait_until = SystemTime::now() + Duration::from_secs(4);
         }
 
-        // Prepare the next turn.
-        if let Some(tx) = finish_tx {
+        if finish {
             message_id = None;
-            pending.clear();
-            let _ = tx.send(Ok(()));
+            sealed = 0;
+            vm.ack(id, Ok(()));
         }
     }
 }
@@ -107,7 +115,7 @@ enum State {
     Idle,
     Running {
         tasks: Arc<Mutex<JoinSet<()>>>,
-        tx: mpsc::UnboundedSender<Message>,
+        input: Arc<InputRouter>,
     },
 }
 
@@ -178,20 +186,14 @@ async fn handle_prompt(
 ) -> HandlerResult {
     match dialogue.get_or_default().await? {
         State::Idle => {
-            let (builder, rx, tx) = factory(msg.from)?.bind_io();
-            let mut agent = builder.build().await?;
+            let (mut vm, input) = ViewModel::new();
+            vm.start(factory(msg.from)?, prompt).await?;
             let mut tasks = JoinSet::new();
-            tasks.spawn(async move {
-                if let Err(e) = agent.prompt(prompt).await {
-                    eprintln!("agent prompt error: {e}");
-                }
-            });
-            tasks.spawn(update_chat(bot, msg.chat.id, rx));
-
-            dialogue.update(State::Running { tasks: Arc::new(Mutex::new(tasks)), tx: tx }).await?;
+            tasks.spawn(update_chat(bot, msg.chat.id, vm));
+            dialogue.update(State::Running { tasks: Arc::new(Mutex::new(tasks)), input }).await?;
         }
-        State::Running { tx, .. } => {
-            tx.send(prompt)?;
+        State::Running { input, .. } => {
+            input.send(prompt)?;
         }
     }
 

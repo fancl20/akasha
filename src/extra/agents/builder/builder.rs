@@ -250,7 +250,7 @@ impl AgentBuilder {
     /// Wire an [`IoExtension`] into the chain and return the transport channels
     /// as `(rx, tx)`:
     ///
-    /// - `rx` — outbound [`OutputEvent`]s (streamed content, tool notices, turn
+    /// - `rx` — outbound [`OutputEvent`]s (streamed content, tool results, turn
     ///   finishes) the transport renders.
     /// - `tx` — the inbound [`Message`] sender the transport feeds to drive the
     ///   next turn.

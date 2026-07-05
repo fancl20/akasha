@@ -2,7 +2,7 @@
 name = "akasha"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.91"
 
 [dependencies]
 async-trait = "0.1"
