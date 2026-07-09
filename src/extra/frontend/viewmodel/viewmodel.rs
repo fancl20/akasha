@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
+use crate::core::agent::AgentError;
 use crate::core::extensions::ExtensionError;
 use crate::core::types::{ContentBlock, Message, TextContent, ToolCall, ToolResult};
 use crate::extra::agents::builder::AgentBuilder;
@@ -289,8 +290,14 @@ pub struct ViewModel {
     next_id: u64,
 }
 
-impl Default for ViewModel {
-    fn default() -> Self {
+impl ViewModel {
+    /// An empty ViewModel owning no runs, alongside its shared input router.
+    ///
+    /// The router is ViewModel-scoped (not per-run), so it is handed out here
+    /// rather than from [`Self::start`] — clone it for whichever task collects
+    /// user input. Spawn runs with [`Self::start`]; dropping the ViewModel aborts
+    /// them. ([`Self::input`] re-obtains the handle from a borrowed ViewModel.)
+    pub fn new() -> Self {
         let (fan_tx, fan_in) = mpsc::unbounded_channel::<(AgentId, FanEvent)>();
         Self {
             runs: HashMap::new(),
@@ -300,20 +307,6 @@ impl Default for ViewModel {
             output: HashSet::new(),
             next_id: 0,
         }
-    }
-}
-
-impl ViewModel {
-    /// An empty ViewModel owning no runs, alongside its shared input router.
-    ///
-    /// The router is ViewModel-scoped (not per-run), so it is handed out here
-    /// rather than from [`Self::start`] — clone it for whichever task collects
-    /// user input. Spawn runs with [`Self::start`]; dropping the ViewModel aborts
-    /// them. ([`Self::input`] re-obtains the handle from a borrowed ViewModel.)
-    pub fn new() -> (Self, Arc<InputRouter>) {
-        let vm = Self::default();
-        let input = vm.router.clone();
-        (vm, input)
     }
 
     /// Build the agent from `builder`, spawn `agent.prompt(first)` plus a forwarder
@@ -328,8 +321,10 @@ impl ViewModel {
         let mut agent = builder.build().await?;
 
         let agent_task = tokio::spawn(async move {
-            if let Err(e) = agent.prompt(first).await {
-                eprintln!("agent prompt error: {e}");
+            match agent.prompt(first).await {
+                Err(AgentError::Extension(ExtensionError::Stopped { .. })) => {}
+                Err(e) => eprintln!("agent prompt error: {e}"),
+                Ok(_) => {}
             }
         });
 
@@ -750,7 +745,7 @@ mod tests {
     async fn reduces_a_turn_with_a_tool_call() {
         let provider = Arc::new(ScriptedProvider::new(vec![toolcall_msg("t1", "search"), text_msg("all done")]));
         let builder = AgentBuilder::new(model(), provider, session()).tool(StubTool).tools_enable(["search"]);
-        let (mut vm, _) = ViewModel::new();
+        let mut vm = ViewModel::new();
         let id = vm.start(builder, user_msg("go")).await.unwrap();
 
         // Append(ToolCall): opens the turn and a Running tool block.
@@ -782,7 +777,7 @@ mod tests {
         let provider_a = Arc::new(ScriptedProvider::new(vec![text_msg("hello from A")]));
         let provider_b = Arc::new(ScriptedProvider::new(vec![text_msg("hello from B")]));
 
-        let (mut vm, _) = ViewModel::new();
+        let mut vm = ViewModel::new();
         let a = vm.start(AgentBuilder::new(model(), provider_a, session()), user_msg("to a")).await.unwrap();
         let b = vm.start(AgentBuilder::new(model(), provider_b, session()), user_msg("to b")).await.unwrap();
         assert_ne!(a, b);
@@ -812,7 +807,7 @@ mod tests {
         let provider_a = Arc::new(ScriptedProvider::new(vec![text_msg("A reply")]));
         let provider_b = Arc::new(ScriptedProvider::new(vec![text_msg("B reply")]));
 
-        let (mut vm, input) = ViewModel::new();
+        let mut vm = ViewModel::new();
         let a = vm.start(AgentBuilder::new(model(), provider_a, session()), user_msg("first to a")).await.unwrap();
         assert_eq!(vm.focus(), Some(a));
         finish_turn(&mut vm, a).await; // A's turn 1, then A blocks on input.
@@ -822,7 +817,7 @@ mod tests {
         finish_turn(&mut vm, b).await; // B's turn 1.
 
         // Route a second message — only B (the focus) receives it.
-        input.send(user_msg("second")).unwrap();
+        vm.input().send(user_msg("second")).unwrap();
         finish_turn(&mut vm, b).await; // B's turn 2.
 
         assert_eq!(vm.transcript(a).unwrap().turns.len(), 1, "A never received the second message");
@@ -835,7 +830,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn output_detach_keeps_reducing_and_auto_acks() {
         let provider = Arc::new(ScriptedProvider::new(vec![text_msg("turn one")]));
-        let (mut vm, _) = ViewModel::new();
+        let mut vm = ViewModel::new();
         let id = vm.start(AgentBuilder::new(model(), provider, session()), user_msg("go")).await.unwrap();
         // Turn 1 is in flight (first prompt delivered directly). Detach output
         // before it finishes: current_thread keeps the spawned task unpolled
@@ -857,7 +852,7 @@ mod tests {
     #[tokio::test]
     async fn detach_output_keeps_transcript_intact_for_reattach() {
         let provider = Arc::new(ScriptedProvider::new(vec![text_msg("turn one")]));
-        let (mut vm, _) = ViewModel::new();
+        let mut vm = ViewModel::new();
         let id = vm.start(AgentBuilder::new(model(), provider, session()), user_msg("go")).await.unwrap();
         finish_turn(&mut vm, id).await;
         assert_eq!(vm.transcript(id).unwrap().turns.len(), 1);
@@ -877,7 +872,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn agent_ended_retains_transcript_then_stop_cleans_up() {
         let provider = Arc::new(ErrorProvider);
-        let (mut vm, _) = ViewModel::new();
+        let mut vm = ViewModel::new();
         let id = vm.start(AgentBuilder::new(model(), provider, session()), user_msg("go")).await.unwrap();
         assert!(vm.is_running(id));
 

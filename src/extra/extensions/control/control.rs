@@ -17,7 +17,9 @@
 //!   indices `start..end` (a half-open range into [`Session::messages`]) are collapsed into
 //!   a single placeholder carrying the fold `id` and `text`. The range must precede the
 //!   marker; the originals stay in the raw session, so the [`ControlUnfoldTool`] can
-//!   surface them again on demand.
+//!   surface them again on demand. When `text` is empty the range is dropped entirely
+//!   with no placeholder — fully hidden from the provider view (still retrievable from
+//!   raw storage via the unfold tool by id).
 //!
 //! Because the rendering is a stateless pure function of the raw messages, there is no
 //! cached view to keep in sync — it is recomputed each turn at the single place it is
@@ -239,8 +241,13 @@ fn render(raw: Vec<Message>) -> Vec<Message> {
             if let Some(first) = rendered.iter().position(|(s, _)| s.start >= lo && s.end <= hi) {
                 let last = first + rendered[first..].iter().take_while(|(s, _)| s.start >= lo && s.end <= hi).count();
                 let drained: Vec<(Range<usize>, Message)> = rendered.drain(first..last).collect();
-                let count = drained.iter().map(|(s, _)| s.end - s.start).sum::<usize>();
-                rendered.insert(first, (lo..hi, fold_ref(&id, count, &text)));
+                if !text.is_empty() {
+                    let count = drained.iter().map(|(s, _)| s.end - s.start).sum::<usize>();
+                    rendered.insert(first, (lo..hi, fold_ref(&id, count, &text)));
+                }
+                // Empty text ⇒ the drained range is dropped with no placeholder (fully
+                // hidden from the provider view; still in raw storage, retrievable via
+                // the unfold tool by id).
             }
             // else: nothing in range is currently live (dropped by a stop, or already
             // subsumed by an earlier fold) — leave no placeholder.
@@ -302,7 +309,7 @@ mod tests {
         let raw = vec![Message {
             role: "custom".to_string(),
             content: vec![ContentBlock::Custom {
-                r#type: "session-mux-switch".to_string(),
+                r#type: "foreign-type".to_string(),
                 content: serde_json::json!({ "id": "x" }),
             }],
         }];
@@ -398,6 +405,23 @@ mod tests {
         let rendered = render(raw);
         assert_eq!(rendered.len(), 1, "an empty range folds nothing and leaves no placeholder");
         assert_eq!(msg_text(&rendered[0]), "a");
+    }
+
+    #[test]
+    fn fold_with_empty_text_drops_the_range_without_placeholder() {
+        // Empty text ⇒ the range is removed entirely; no placeholder surfaces, and the
+        // messages before/after it stay visible.
+        let raw = vec![
+            text_msg("user", "keep-before"),
+            text_msg("user", "hide1"),
+            text_msg("assistant", "hide2"),
+            fold_message_with_id(1, 3, "hid", ""), // empty text
+            text_msg("user", "keep-after"),
+        ];
+        let rendered = render(raw);
+        assert_eq!(rendered.len(), 2, "folded range dropped with no placeholder");
+        assert_eq!(msg_text(&rendered[0]), "keep-before");
+        assert_eq!(msg_text(&rendered[1]), "keep-after");
     }
 
     #[test]

@@ -14,6 +14,9 @@ pub enum ToolCallDecision {
 pub enum ExtensionError {
     #[error("extension '{name}': {message}")]
     ExtensionFailed { name: String, message: String },
+    /// An expected, intentional stop of the agent loop .
+    #[error("extension '{name}' stopped the run: {message}")]
+    Stopped { name: String, message: String },
 }
 
 #[async_trait]

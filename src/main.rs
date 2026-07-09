@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::ops::Sub;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -11,10 +10,9 @@ use akasha::extra::agents::builder::{AgentBuilder, SessionAdapter, SessionManage
 use akasha::extra::frontend::telegram;
 use akasha::extra::providers::deepseek::DeepSeekProvider;
 use akasha::extra::providers::tier::{TierProvider, tier};
-use akasha::extra::sessions::mux::MuxSession;
+use akasha::extra::sessions::mux::Mux;
 use akasha::extra::sessions::sqlite::SqliteSession;
 use akasha::extra::tools::{mcp, skill};
-use chrono::{Duration, Local};
 use clap::Parser;
 
 #[derive(Parser)]
@@ -97,9 +95,6 @@ async fn main() {
     let mut tools = ToolRegistry::new();
     if let Some(dir) = &cli.skills {
         let config = skill::SkillConfig { dir: dir.clone() };
-        // A shared SessionManager the skills fork/resume through. Forks start
-        // fresh (the root is empty) and isolate via a `stop`, matching the old
-        // per-call factory behavior; the manager lives for the process.
         let manager: Arc<Mutex<dyn SessionManager>> =
             Arc::new(Mutex::new(SessionAdapter::new(InMemorySession::new(), || InMemorySession::new().arc())));
         skill::register(&mut tools, &config, tier(1), provider.clone(), base_tools, manager)
@@ -113,11 +108,15 @@ async fn main() {
         content: vec![ContentBlock::Text(TextContent { content: include_str!("prompt.md").to_string() })],
     };
 
+    let factory = move |session: Arc<Mutex<dyn Session>>| {
+        AgentBuilder::base(tier(0), provider.clone(), session).tools(tools.clone())
+    };
+
     if let Err(e) = telegram::dispatch(
         cli.telegram_token,
         allowed_ids,
         Arc::new(move |user| {
-            let (session, mux_ext, tools) = match user {
+            let session: Arc<Mutex<dyn SessionManager>> = match user {
                 Some(user) => {
                     let dir = data_dir().join("db");
                     let _ = std::fs::create_dir_all(&dir);
@@ -126,30 +125,13 @@ async fn main() {
                         .to_str()
                         .ok_or(anyhow::anyhow!("invalid db path"))?
                         .to_string();
-
-                    let prompt = prompt.clone();
-                    let loader = Arc::new(move |ref_name: &str| -> anyhow::Result<Box<dyn Session>> {
-                        let mut session = Box::new(SqliteSession::new(&db_path_str, ref_name)?);
-                        session.append(prompt.clone()).map_err(|e| anyhow::anyhow!("{e}"))?;
-                        Ok(session)
-                    });
-
-                    let id = Arc::new(|| Local::now().sub(Duration::hours(4)).format("%Y-%m-%d").to_string());
-                    let (mux, ext, tool) = MuxSession::new(id, loader)?;
-                    let mut tools = tools.clone();
-                    tools.register(Box::new(tool));
-                    let mux: Arc<Mutex<dyn Session>> = mux;
-
-                    (mux, Some(ext), tools)
+                    Arc::new(Mutex::new(SqliteSession::new(&db_path_str, "telegram-mux")?))
                 }
-                None => (InMemorySession::new().arc(), None, tools.clone()),
+                None => {
+                    Arc::new(Mutex::new(SessionAdapter::new(InMemorySession::new(), || InMemorySession::new().arc())))
+                }
             };
-
-            let mut builder = AgentBuilder::base(tier(0), provider.clone(), session).tools(tools);
-            if let Some(ext) = mux_ext {
-                builder = builder.extension(ext);
-            }
-            Ok(builder)
+            Ok(Mux::new(session, factory.clone(), prompt.clone()))
         }),
     )
     .await

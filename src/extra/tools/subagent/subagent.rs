@@ -275,7 +275,7 @@ impl ToolHandler for YieldTool {
 ///
 /// [`on_message_start`](Extension::on_message_start) fires at the start of every
 /// model call inside `agent_loop`. Once [`YieldTool`] has captured a result, the
-/// next message start returns `Err`, short-circuiting the loop so the subagent
+/// next message start returns `ExtensionError::Stopped`, short-circuiting the loop so the subagent
 /// makes no further calls after its result is in. The engine treats that abort
 /// as the expected end-of-run signal (it checks `yielded`), not a failure.
 struct AbortOnYield {
@@ -290,7 +290,7 @@ impl Extension for AbortOnYield {
 
     async fn on_message_start(&mut self, messages: Vec<Message>) -> Result<Vec<Message>, ExtensionError> {
         if self.yielded.lock().unwrap().is_some() {
-            return Err(ExtensionError::ExtensionFailed {
+            return Err(ExtensionError::Stopped {
                 name: self.name().to_string(),
                 message: "subagent yielded; aborting remaining turns".to_string(),
             });

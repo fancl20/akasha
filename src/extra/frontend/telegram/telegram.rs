@@ -8,29 +8,28 @@ use teloxide::sugar::request::RequestLinkPreviewExt;
 use teloxide::types::{ChatAction, ChatId, Message as TgMessage, MessageId, Update, User};
 use teloxide::utils::command::BotCommands;
 use teloxide::{ApiError, Bot, RequestError, dptree};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinSet;
 
 use crate::core::types::{ContentBlock, Message, TextContent};
-use crate::extra::agents::builder::AgentBuilder;
-use crate::extra::frontend::viewmodel::{Block, InputRouter, Step, Turn, ViewModel};
+use crate::extra::frontend::mux::Mux;
+use crate::extra::frontend::viewmodel::{Block, Step, Turn};
 
 /// A Telegram-flavored flattening of a turn's blocks into one message: assistant
 /// text verbatim, tool calls as `name: args` (rendered when the call is triggered,
 /// matching the prior tool-notification). Reasoning is skipped.
 fn render_turn(turn: &Turn) -> String {
-    let mut out = String::new();
-    for block in &turn.blocks {
-        match block {
-            Block::Text(t) => out.push_str(&t.content),
-            Block::Reasoning(_) => {}
+    turn.blocks
+        .last()
+        .map(|block| match block {
+            Block::Text(t) => t.content.clone(),
+            Block::Reasoning(_) => "".to_string(),
             Block::ToolCall(tc) => {
                 let note = format!("{}: {}", tc.call.name, tc.call.arguments);
-                out.push_str(&note[..note.ceil_char_boundary(512)]);
+                note[..note.ceil_char_boundary(512)].to_string()
             }
-        }
-    }
-    out
+        })
+        .unwrap_or_default()
 }
 
 /// Edit `id` in place when `Some`, else send a new message. Empty `sending` is a
@@ -65,13 +64,13 @@ async fn update_message(bot: &Bot, chat_id: ChatId, id: Option<MessageId>, sendi
 /// `message_id` resets) and the remainder continues in a fresh message — one
 /// chunk per throttle window while streaming, the whole tail on finish. The
 /// offset resets each turn.
-async fn update_chat(bot: Bot, chat_id: ChatId, mut vm: ViewModel) {
+async fn update_chat(bot: Bot, chat_id: ChatId, mut mux: Mux) {
     let mut message_id = None;
     let mut sealed = 0usize;
     let mut wait_until = SystemTime::UNIX_EPOCH;
 
     loop {
-        let (id, finish) = match vm.step().await {
+        let (id, finish) = match mux.step().await {
             None => return,
             Some(Step::TurnFinished { id }) => (id, true),
             Some(Step::Updated { id }) if SystemTime::now() >= wait_until => (id, false),
@@ -79,7 +78,7 @@ async fn update_chat(bot: Bot, chat_id: ChatId, mut vm: ViewModel) {
             Some(_) => continue,
         };
 
-        let text = vm.transcript(id).and_then(|t| t.turns.last().map(render_turn)).unwrap_or_default();
+        let text = mux.transcript(id).and_then(|t| t.turns.last().map(render_turn)).unwrap_or_default();
         while !text[sealed..].trim().is_empty() {
             let rest = &text[sealed..];
             let end = rest.char_indices().nth(4095).map(|(i, c)| i + c.len_utf8());
@@ -104,7 +103,7 @@ async fn update_chat(bot: Bot, chat_id: ChatId, mut vm: ViewModel) {
         if finish {
             message_id = None;
             sealed = 0;
-            vm.ack(id, Ok(()));
+            mux.ack(id, Ok(()));
         }
     }
 }
@@ -115,13 +114,13 @@ enum State {
     Idle,
     Running {
         tasks: Arc<Mutex<JoinSet<()>>>,
-        input: Arc<InputRouter>,
+        input: mpsc::UnboundedSender<Message>,
     },
 }
 
 type AgentDialogue = Dialogue<State, InMemStorage<State>>;
 type HandlerResult = Result<(), Box<dyn std::error::Error + Send + Sync>>;
-type AgentFactory = Arc<dyn Fn(Option<User>) -> anyhow::Result<AgentBuilder> + Send + Sync + 'static>;
+type AgentFactory = Arc<dyn Fn(Option<User>) -> anyhow::Result<Mux> + Send + Sync + 'static>;
 
 #[derive(BotCommands, Clone)]
 #[command(rename_rule = "lowercase", description = "Bot commands")]
@@ -186,10 +185,12 @@ async fn handle_prompt(
 ) -> HandlerResult {
     match dialogue.get_or_default().await? {
         State::Idle => {
-            let (mut vm, input) = ViewModel::new();
-            vm.start(factory(msg.from)?, prompt).await?;
+            let mux = factory(msg.from)?;
+            let input = mux.input();
+            input.send(prompt)?;
+
             let mut tasks = JoinSet::new();
-            tasks.spawn(update_chat(bot, msg.chat.id, vm));
+            tasks.spawn(update_chat(bot, msg.chat.id, mux));
             dialogue.update(State::Running { tasks: Arc::new(Mutex::new(tasks)), input }).await?;
         }
         State::Running { input, .. } => {

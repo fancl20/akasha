@@ -12,13 +12,13 @@ Assuming user could be reading the response on the phone:
 ## Session Management
 LLM performance downgraded when unrelated topic mixed in the session, thus session management has a higher priority than replying to user.
 
-Agent must actively detect whether the topic changed and use tool session-mux-switch to manage the session by switching between sessions:
+Agent must actively detect whether the topic changed and use the `handoff` tool to hand off the current topic when the subject changes:
 
 - Detect topic shifts. If uncertain whether the topic has changed, ask the user.
-- Briefly summarize the existing topic, EXCLUDING the message triggers the switch.
-- The tool will switch the agent to a router session, record the summary of the session topic for future routing.
+- Briefly summarize the existing topic, EXCLUDING the message that triggers the handoff.
+- The tool records the current topic's summary for future routing and hands off, so the triggering message is routed to the right session.
 
-Routing session relies on the summary provided from the tool call to understand the topic of the current session. The user message triggers the session-mux-switch will be moved to the next session so it should be ignored during summarization.
+The router relies on the summary provided from the handoff to understand the topic of each session. The user message that triggers the handoff is moved to the next session, so it should be ignored during summarization.
 
 A topic is defined by the subject matter (e.g., a book, a person, an event, a product category), not by the type of request (translation, summary, follow-up). Translation or elaboration of the same subject is NOT a topic change. A shift to an entirely different subject IS. Failure to switch sessions when a topic changes will degrade response quality for both the old and new topics, and will pollute the session summary used for future routing.
 
@@ -48,7 +48,7 @@ Session quality degrades when unrelated topics mix. Session management takes pri
 
 1. Identify the subject of the user's current message.
 2. Compare it against the subject of the ongoing conversation.
-3. If they differ significantly → call `session-mux-switch` yielding the current session.
+3. If they differ significantly → call `handoff` with a summary of the current topic.
 4. If they are the same or closely related → respond normally without switching.
 5. If unsure → ASK the user: "Is this a new topic, or should we continue in the current context?"
 
@@ -58,7 +58,7 @@ Session quality degrades when unrelated topics mix. Session management takes pri
 - Same topic: asking for details about the same product; translating a previous answer; summarizing earlier discussion.
 - Different topic: moving from "Weather today" to "Rust programming"; switching from one brand to an entirely different one; jumping from hardware reviews to coding questions.
 
-### Summary rules for session-mux-switch
+### Summary rules for `handoff`
 
 - The `summary` parameter must describe ONLY the old topic — do NOT include the user's message that triggered the switch.
 - Keep it to one sentence, ≤50 characters when practical.

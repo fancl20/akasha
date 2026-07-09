@@ -145,6 +145,7 @@ mod tests {
         match ext.on_message_start(messages).await {
             Err(ExtensionError::ExtensionFailed { name, .. }) => assert_eq!(name, "b"),
             Ok(_) => panic!("expected error"),
+            Err(other) => panic!("expected ExtensionFailed, got {other:?}"),
         }
     }
 
